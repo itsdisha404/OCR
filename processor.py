@@ -428,73 +428,37 @@ def extract_invoice_header(page1_rows: list, tracker: AccuracyTracker) -> dict:
 
 
 def extract_bill_to(page1_rows: list, tracker: AccuracyTracker) -> dict:
-    """Extract Bill To section with improved accuracy."""
+    """Extract Bill To section - only address. Returns null for missing values."""
     flat = [item for row in page1_rows for item in row]
     
-    # Bill To and Ship To are side-by-side; left half of page = Bill To
-    LEFT_HALF = 680
+    # Address - collect from address section
+    address = None
+    address_conf = 0.0
+    addr_lines = []
+    collecting = False
     
-    addr_lines, collecting = [], False
     for row in page1_rows:
-        row_text = " ".join(i["text"] for i in row)
-        if re.search(r"Bill\s*To|Bill\s*Address", row_text, re.IGNORECASE):
+        row_text = " ".join(item["text"] for item in row)
+        if re.search(r"Address|Location|Office|Warehouse", row_text, re.IGNORECASE):
             collecting = True
-            bill_to_x = next(
-                (i["x2"] for i in row if re.search(r"Bill\s*To|Bill\s*Address", i["text"], re.IGNORECASE)), 0
-            )
-            same_row_name = [
-                i["text"] for i in row
-                if i["x1"] > bill_to_x
-                and i["x1"] < LEFT_HALF
-                and i["text"] not in (":", "")
-                and not re.search(r"Ship\s*To|Delivery\s*Address", i["text"], re.IGNORECASE)
-            ]
-            if same_row_name:
-                addr_lines.append(" ".join(same_row_name))
             continue
-        
         if collecting:
-            if re.search(r"(Place\s*of\s*Supply|Description|Item|HSN|Product)", row_text, re.IGNORECASE):
+            if re.search(r"Product|HSN|Item|Bill|Ship|GSTIN|DL\s*No", row_text, re.IGNORECASE):
                 break
-            left = [i["text"] for i in row if i["x1"] < LEFT_HALF]
-            if left:
-                addr_lines.append(" ".join(left))
+            addr_parts = [item["text"].strip() for item in row if item["text"].strip()]
+            if addr_parts:
+                addr_lines.append(" ".join(addr_parts))
     
-    name = addr_lines[0] if addr_lines else ""
-    address = ", ".join(addr_lines[1:]).strip(", ") if len(addr_lines) > 1 else ""
-    
-    cust_gstin_text, cust_gstin_conf = _find_value(flat, r"Cust\.?\s*GSTIN|Customer\s*GSTIN")
-    cust_gstin = _clean_gstin(cust_gstin_text) if cust_gstin_text else ""
-    
-    cust_dl_text, cust_dl_conf = _find_value(flat, r"Cust\.?\s*D\.?L|Customer\s*DL")
-    cust_dl = cust_dl_text if cust_dl_text else ""
-    
-    dl_exp_text, dl_exp_conf = _find_value(flat, r"DL\s*Exp\.?\s*Date|Expiry\s*Date")
-    dl_exp_date = _clean_date(dl_exp_text) if dl_exp_text else ""
-    
-    po_ref_text, po_ref_conf = _find_value(flat, r"Cust\.?\s*PO\s*Ref|PO\s*Reference")
-    po_ref = po_ref_text if po_ref_text else ""
-    
-    po_ref_date_text, po_ref_date_conf = _find_value(flat, r"PO\s*Ref\.?\s*Date|PO\s*Date")
-    po_ref_date = _clean_date(po_ref_date_text) if po_ref_date_text else ""
+    if addr_lines:
+        address = ", ".join(addr_lines)
+        address_conf = 0.9
     
     # Track accuracy
-    tracker.add_field("bill_to", "name", name, 0.95 if name else 0.3, is_empty=(not name))
-    tracker.add_field("bill_to", "address", address, 0.9 if address else 0.3, is_empty=(not address))
-    tracker.add_field("bill_to", "cust_gstin", cust_gstin, cust_gstin_conf, is_empty=(not cust_gstin))
-    tracker.add_field("bill_to", "cust_dl_no", cust_dl, cust_dl_conf, is_empty=(not cust_dl))
-    tracker.add_field("bill_to", "dl_exp_date", dl_exp_date, dl_exp_conf, is_empty=(not dl_exp_date))
-    tracker.add_field("bill_to", "po_ref", po_ref, po_ref_conf, is_empty=(not po_ref))
-    tracker.add_field("bill_to", "po_ref_date", po_ref_date, po_ref_date_conf, is_empty=(not po_ref_date))
+    tracker.add_field("bill_to", "address", address or "NULL", address_conf, 
+                     is_empty=(address is None))
     
     return {
-        "name": name,
         "address": address,
-        "cust_gstin": cust_gstin,
-        "cust_dl_no": cust_dl,
-        "dl_exp_date": dl_exp_date,
-        "po_ref": po_ref,
-        "po_ref_date": po_ref_date,
     }
 
 
@@ -503,23 +467,20 @@ def extract_bill_to(page1_rows: list, tracker: AccuracyTracker) -> dict:
 COL_KEYWORDS = [
     ("product_code_desc", r"Product\s*Code|Product\s*Description|Product\s*Name|Description\s*of\s*Goods|Material\s*Description|Item\s*Description|Item\s*Name|Description|Goods"),
     ("hsn_code", r"\bHSN\b|HSN\s*Code|HSN/SAC|SAC\s*Code"),
-    ("div", r"\bDIV\.?\b|Division"),
     ("batch_no", r"Batch\s*No\.?|Batch"),
     ("expiry_date", r"Expiry|Exp\s*Date|Expiry\s*Date|Exp\.?|Expiration"),
     ("mrp_per_unit", r"\bMRP\b|Retail\s*Price|MRP\s*\(.*\)|Retail\s*Price\s*\(MRP\)"),
     ("qty_uom", r"\bQty\b|Quantity|Billed\s*Quantity|Sale\s*Qty|Billed\s*Qty|Qty\s*/\s*UOM"),
-    ("trade_price_unit", r"Price\s*/\s*Unit|Price/?Unit|Rate\s*\(Per\s*item\)|Rate\s*Per\s*Item|Unit\s*Rate|Price\s*Per\s*Unit"),
-    ("tp_ptr_value", r"\bPTR\b|Price\s*To\s*Retailer|PTS"),
+    ("tp_ptr_value", r"\bPTR\b|Price\s*To\s*Retailer"),
     ("trade_disc_pct", r"\bDisc\b|Discount\s*%|Total\s*Disc\.?%|Cash\s*Disc"),
     ("cgst_pct", r"\bCGST\b|CGST\s*Rate"),
     ("sgst_pct", r"\bSGST\b|SGST\s*Rate"),
-    ("igst_pct", r"\bIGST\b|IGST\s*Rate"),
     ("pts", r"\bPTS\b|Price\s*To\s*Stockist"),
     ("amount", r"\bAmount\b|Net\s*Amount|Total\s*Amount|Taxable\s*Value|Value"),
 ]
 
 NUMERIC_COLS = {
-    "mrp_per_unit", "trade_price_unit", "tp_ptr_value",
+    "mrp_per_unit", "tp_ptr_value",
     "trade_disc_pct", "cgst_pct", "sgst_pct", "pts", "amount", "qty"
 }
 
@@ -638,48 +599,73 @@ def _finalize_item(raw: defaultdict, tracker: AccuracyTracker, item_idx: int) ->
         if _contains_footer_text(text):
             item[col] = None
             conf = 0.1
+        elif col == "product_code_desc":
+            # Extract only product name, remove prices and percentages at the end
+            # "Ubicar Tablets 10s 5% 392.58" → "Ubicar Tablets 10s"
+            # Remove trailing percentages, amounts, and numbers
+            cleaned = re.sub(r'\s*\d+%\s*[\d.]*\s*$', '', text.strip())  # Remove "5% 392.58"
+            cleaned = re.sub(r'\s*[\d.]+\s*$', '', cleaned)  # Remove trailing numbers
+            
+            # Split "PRODUCT NAME 404552" into description + code (only if matches pattern)
+            m = re.match(r"^(.*?)\s+(\d{8})\s*$", cleaned.strip())
+            if m:
+                item["product_description"] = m.group(1).strip()
+                item["product_code"] = m.group(2).strip()
+            else:
+                item["product_description"] = cleaned.strip() if cleaned else None
+                item["product_code"] = None
+            conf = 0.9 if item["product_description"] else 0.3
+        elif col == "batch_no":
+            # Extract only batch number, remove HSN codes and amounts
+            # "21069099 YFUN2424 1722.80 12% 206.74" → "YFUN2424"
+            # Remove leading 8-digit numbers (HSN codes)
+            cleaned = re.sub(r'^\d{8}\s*', '', text.strip())
+            # Remove trailing prices and percentages
+            cleaned = re.sub(r'\s*\d+%\s*[\d.]*\s*$', '', cleaned)
+            cleaned = re.sub(r'\s*[\d.]+\s*$', '', cleaned)
+            # Extract the alphanumeric batch code (usually format: "YFUN2424" or "15'AMRSO024")
+            m = re.search(r"([A-Z0-9']+)", cleaned)
+            if m:
+                item[col] = m.group(1).strip()
+                conf = 0.85
+            else:
+                item[col] = cleaned.strip() if cleaned else None
+                conf = 0.6 if cleaned else 0.3
         elif col in NUMERIC_COLS:
             value = _extract_numeric(text)
             item[col] = value
-            conf = 0.8 if value > 0 else 0.3
+            conf = 0.85 if value > 0 else 0.3
         elif col == "qty_uom":
             m = re.match(r"(\d+)\s*([A-Z]+)?", text)
             if m:
                 item["qty"] = int(m.group(1))
-                item["uom"] = m.group(2) or ""
+                item["uom"] = m.group(2) or None
                 conf = 0.9
             else:
-                item["qty_uom"] = text if text else None
+                item["qty"] = _extract_numeric(text) if text else None
+                item["uom"] = None
                 conf = 0.5
-        elif col == "product_code_desc":
-            # Split "PRODUCT NAME 404552" into description + code
-            m = re.match(r"^(.*?)\s+(\d{5,7})\s*$", text.strip())
-            if m:
-                item["product_description"] = m.group(1).strip()
-                item["product_code"] = m.group(2).strip()
-                conf = 0.95
-            else:
-                item["product_description"] = text if text else None
-                item["product_code"] = None
-                conf = 0.7
         elif col == "expiry_date":
             # Validate: expiry date should be in MM/YYYY or DD/MM/YYYY format
-            # NOT a large decimal number like 172.25, 164.57, etc.
             cleaned = _clean_date(text) if text else None
             
             # Check if it looks like a valid date (not a price)
-            # Valid: "08/2026", "13/11/2024", "Nov-2027"
-            # Invalid: "172.25", "191.39", "164.57" (these are prices/decimals)
             if cleaned and not re.match(r"^\d{1,2}/\d{4}$|^\d{1,2}/\d{1,2}/\d{4}$", cleaned):
                 # Doesn't match date format, likely a price - set to null
                 item[col] = None
                 conf = 0.2
             else:
                 item[col] = cleaned
-                conf = 0.85 if cleaned else 0.3
-        elif col in ["batch_no", "hsn_code"]:
-            item[col] = text if text else None
-            conf = 0.9 if text else 0.3
+                conf = 0.88 if cleaned else 0.3
+        elif col in ["hsn_code"]:
+            # HSN code should be 8 digits, extract only that
+            m = re.search(r"(\d{8})", text)
+            if m:
+                item[col] = m.group(1)
+                conf = 0.95
+            else:
+                item[col] = None
+                conf = 0.3
         else:
             item[col] = text if text else None
             conf = 0.85 if text else 0.3
