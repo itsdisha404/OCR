@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+
+# Project data folders
+input/
+output/
+images/
