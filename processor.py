@@ -85,6 +85,12 @@ LINE_ITEM_FIELDS = [
 ]
 
 COLUMN_SYNONYMS = {
+    "mfg_name": [
+        "mfg name", "mfg.", "manufacturer", "mfg"
+    ],
+    "category": [
+        "cat", "category"
+    ],
     "product_description": [
         "product", "description", "product description", "material description",
         "item description"
@@ -123,7 +129,7 @@ COLUMN_SYNONYMS = {
         "sgst"
     ],
     "total_amount": [
-        "amount", "total", "net amount", "taxable"
+        "total amount", "line total", "net amount", "total value", "taxable value"
     ]
 }
 
@@ -219,60 +225,224 @@ class AccuracyScorer:
     
     def score_item(self, item_dict: Dict[str, Any]) -> float:
         """
-        Calculate accuracy for a line item.
-        Score based on:
-        - Non-null fields: 80%
-        - Field quality: 20%
+        Calculate accuracy for a line item with realistic validation.
+        Scores each critical field 0-100, then averages them.
+        Penalties for: missing fields, invalid ranges, inconsistent pricing/totals.
         """
         if not item_dict:
             return 0.0
         
-        # Critical fields for pharmaceutical items
-        critical_fields = [
-            'product_description', 'hsn_code', 'batch_no', 
-            'qty', 'mrp', 'pts', 'cgst', 'sgst'
-        ]
+        field_scores = {}
         
-        # Count non-null critical fields
-        non_null_critical = sum(
-            1 for f in critical_fields 
-            if item_dict.get(f) is not None
-        )
+        # Product Description
+        prod = str(item_dict.get('product_description') or '').strip()
+        if prod and len(prod) >= 3 and not re.search(r'^[\d\s\.\-]+$', prod):
+            field_scores['product_description'] = 100.0
+        elif prod:
+            field_scores['product_description'] = 50.0
+        else:
+            field_scores['product_description'] = 0.0
         
-        critical_ratio = non_null_critical / len(critical_fields)
+        # HSN Code (8 digits)
+        hsn = str(item_dict.get('hsn_code') or '').strip()
+        if re.fullmatch(r'\d{8}', hsn):
+            field_scores['hsn_code'] = 100.0
+        elif hsn:
+            field_scores['hsn_code'] = 40.0
+        else:
+            field_scores['hsn_code'] = 0.0
         
-        # Quality check: verify numeric fields are actually numbers
-        quality_score = 1.0
-        numeric_fields = ['qty', 'mrp', 'ptr', 'pts', 'cgst', 'sgst', 'igst', 'discount']
-        for field in numeric_fields:
-            val = item_dict.get(field)
-            if val is not None and not isinstance(val, (int, float)):
-                quality_score -= 0.1
+        # Batch Number
+        batch = str(item_dict.get('batch_no') or '').strip()
+        if batch and len(batch) >= 3 and len(batch) <= 14:
+            field_scores['batch_no'] = 100.0
+        elif batch:
+            field_scores['batch_no'] = 40.0
+        else:
+            field_scores['batch_no'] = 0.0
         
-        overall_accuracy = (critical_ratio * 80) + (quality_score * 20)
+        # Expiry Date
+        exp = str(item_dict.get('expiry_date') or '').strip()
+        if exp and re.search(r'^\d{1,2}/\d{2,4}$', exp):
+            field_scores['expiry_date'] = 100.0
+        elif exp:
+            field_scores['expiry_date'] = 40.0
+        else:
+            field_scores['expiry_date'] = 20.0
+        
+        # Quantity (must be positive integer)
+        qty_val = item_dict.get('qty')
+        if isinstance(qty_val, (int, float)) and qty_val > 0:
+            field_scores['qty'] = 100.0
+        else:
+            field_scores['qty'] = 0.0
+        
+        # MRP (price range 5-5000)
+        mrp_val = item_dict.get('mrp')
+        if isinstance(mrp_val, (int, float)) and 5 <= mrp_val <= 5000:
+            field_scores['mrp'] = 100.0
+        elif isinstance(mrp_val, (int, float)):
+            field_scores['mrp'] = 40.0
+        else:
+            field_scores['mrp'] = 0.0
+        
+        # PTR (price range 1-5000)
+        ptr_val = item_dict.get('ptr')
+        if isinstance(ptr_val, (int, float)) and 1 <= ptr_val <= 5000:
+            field_scores['ptr'] = 100.0
+        elif isinstance(ptr_val, (int, float)):
+            field_scores['ptr'] = 40.0
+        else:
+            field_scores['ptr'] = 0.0
+        
+        # PTS (price range 1-5000)
+        pts_val = item_dict.get('pts')
+        if isinstance(pts_val, (int, float)) and 1 <= pts_val <= 5000:
+            field_scores['pts'] = 100.0
+        elif isinstance(pts_val, (int, float)):
+            field_scores['pts'] = 40.0
+        else:
+            field_scores['pts'] = 0.0
+        
+        # Discount (0-100%)
+        disc_val = item_dict.get('discount')
+        if isinstance(disc_val, (int, float)) and 0 <= disc_val <= 100:
+            field_scores['discount'] = 100.0
+        elif isinstance(disc_val, (int, float)):
+            field_scores['discount'] = 50.0
+        else:
+            field_scores['discount'] = 0.0
+        
+        # CGST (0-28%)
+        cgst_val = item_dict.get('cgst')
+        if isinstance(cgst_val, (int, float)) and 0 <= cgst_val <= 28:
+            field_scores['cgst'] = 100.0
+        elif isinstance(cgst_val, (int, float)):
+            field_scores['cgst'] = 40.0
+        else:
+            field_scores['cgst'] = 0.0
+        
+        # SGST (0-28%)
+        sgst_val = item_dict.get('sgst')
+        if isinstance(sgst_val, (int, float)) and 0 <= sgst_val <= 28:
+            field_scores['sgst'] = 100.0
+        elif isinstance(sgst_val, (int, float)):
+            field_scores['sgst'] = 40.0
+        else:
+            field_scores['sgst'] = 0.0
+        
+        # Total Amount (should be reasonable: qty*ptr <= total <= qty*mrp)
+        total_val = item_dict.get('total_amount')
+        
+        # Check if total seems plausible
+        total_score = 0.0
+        if isinstance(total_val, (int, float)) and total_val > 0:
+            # Estimate reasonable range: qty * ptr_80% to qty * mrp
+            qty_for_calc = qty_val if isinstance(qty_val, (int, float)) and qty_val > 0 else 1
+            mrp_for_calc = mrp_val if isinstance(mrp_val, (int, float)) and mrp_val > 0 else 1000
+            ptr_for_calc = ptr_val if isinstance(ptr_val, (int, float)) and ptr_val > 0 else 500
+            
+            low_estimate = qty_for_calc * ptr_for_calc * 0.7  # Allow for discount
+            high_estimate = qty_for_calc * mrp_for_calc * 1.1  # Allow for minor OCR errors
+            if low_estimate <= total_val <= high_estimate:
+                total_score = 100.0
+            elif total_val < low_estimate * 0.5 or total_val > high_estimate * 2:
+                total_score = 10.0  # Way off
+            else:
+                total_score = 50.0  # Somewhat plausible but dubious
+        else:
+            total_score = 0.0
+        
+        field_scores['total_amount'] = total_score
+        
+        # Calculate average of critical fields (product, hsn, qty, mrp, total_amount, cgst, sgst)
+        critical_fields = ['product_description', 'hsn_code', 'qty', 'mrp', 'total_amount', 'cgst', 'sgst']
+        
+        if critical_fields:
+            critical_avg = sum(field_scores.get(f, 0) for f in critical_fields) / len(critical_fields)
+        else:
+            critical_avg = 0.0
+        
+        # Penalties for unrealistic values
+        hierarchy_penalty = 0.0
+        if (isinstance(mrp_val, (int, float)) and isinstance(ptr_val, (int, float)) and 
+            mrp_val > 0 and ptr_val > mrp_val):
+            hierarchy_penalty = 5.0
+        
+        discount_penalty = 0.0
+        if isinstance(disc_val, (int, float)) and not (0 <= disc_val <= 100):
+            discount_penalty = 10.0
+        
+        overall_accuracy = critical_avg - hierarchy_penalty - discount_penalty
         return round(min(100, max(0, overall_accuracy)), 2)
     
     def score_section(self, section_data: Dict[str, Any]) -> float:
-        """Score extraction for header or bill-to section"""
+        """Score extraction for header or bill-to section with field-level validation"""
         if not section_data:
             return 0.0
 
-        def is_present(value: Any) -> bool:
-            if value is None:
-                return False
-            if isinstance(value, str):
-                return bool(value.strip())
-            if isinstance(value, (list, tuple, set, dict)):
-                return len(value) > 0
-            return True
+        field_scores = {}
+        
+        # Identify section type and score accordingly
+        if 'company_name' in section_data:
+            # HEADER SECTION
+            company = str(section_data.get('company_name') or '').strip()
+            field_scores['company_name'] = 100.0 if (company and len(company) >= 5) else 0.0
+            
+            pan = str(section_data.get('pan') or '').strip()
+            if re.fullmatch(r'[A-Z]{5}\d{4}[A-Z]', pan):
+                field_scores['pan'] = 100.0
+            elif pan:
+                field_scores['pan'] = 50.0
+            else:
+                field_scores['pan'] = 0.0
+            
+            inv_no = str(section_data.get('invoice_no') or '').strip()
+            field_scores['invoice_no'] = 100.0 if (inv_no and len(inv_no) >= 3) else 20.0
+            
+            inv_date = str(section_data.get('invoice_date') or '').strip()
+            if inv_date and re.search(r'\d{1,2}/\d{1,2}/\d{4}', inv_date):
+                field_scores['invoice_date'] = 100.0
+            elif inv_date:
+                field_scores['invoice_date'] = 50.0
+            else:
+                field_scores['invoice_date'] = 0.0
+        
+        elif 'address' in section_data:
+            # BILL-TO SECTION
+            name = section_data.get('name')
+            if isinstance(name, list) and len(name) > 0:
+                field_scores['name'] = 100.0
+            elif isinstance(name, str) and len(name) > 5:
+                field_scores['name'] = 100.0
+            else:
+                field_scores['name'] = 0.0
+            
+            addr = str(section_data.get('address') or '').strip()
+            if addr and len(addr) >= 10:
+                field_scores['address'] = 100.0
+            elif addr:
+                field_scores['address'] = 50.0
+            else:
+                field_scores['address'] = 20.0
+        
+        if not field_scores:
+            # Fallback: simple presence check
+            def is_present(value: Any) -> bool:
+                if value is None:
+                    return False
+                if isinstance(value, str):
+                    return bool(value.strip())
+                if isinstance(value, (list, tuple, set, dict)):
+                    return len(value) > 0
+                return True
 
-        non_null_fields = sum(1 for v in section_data.values() if is_present(v))
-        total_fields = len(section_data)
+            non_null_fields = sum(1 for v in section_data.values() if is_present(v))
+            total_fields = len(section_data)
+            return round((non_null_fields / total_fields) * 100, 2) if total_fields > 0 else 0.0
         
-        if total_fields == 0:
-            return 0.0
-        
-        return round((non_null_fields / total_fields) * 100, 2)
+        avg_score = sum(field_scores.values()) / len(field_scores) if field_scores else 0.0
+        return round(min(100, max(0, avg_score)), 2)
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -472,25 +642,108 @@ def _is_valid_invoice_no_text(text: str) -> bool:
 
 
 def _extract_expiry_from_text(text: str) -> Optional[str]:
-    """Extract expiry date in MM/YYYY-like forms from row text."""
+    """Extract expiry date from row text; when multiple dates exist use the latest as expiry."""
     if not text:
         return None
 
-    mm_yyyy = re.search(r"\b(0[1-9]|1[0-2])[/-](\d{2,4})\b", text)
-    if mm_yyyy:
-        month, year = mm_yyyy.groups()
-        if len(year) == 2:
-            year = f"20{year}"
-        return f"{month}/{year}"
+    month_map = {
+        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+        "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+    }
 
-    mon_yyyy = re.search(r"\b([A-Za-z]{3})[-/](\d{2,4})\b", text)
-    if mon_yyyy:
-        mon, year = mon_yyyy.groups()
-        if len(year) == 2:
-            year = f"20{year}"
-        return f"{mon.title()}-{year}"
+    candidates: List[Tuple[int, int, int, str]] = []
 
-    return None
+    # DD/MM/YYYY
+    for day, month, year in re.findall(r"\b([0-3]?\d)[/-](0?[1-9]|1[0-2])[/-](\d{2,4})\b", text):
+        y = int(year)
+        if y < 100:
+            y += 2000 if y < 50 else 1900
+        d = int(day)
+        m = int(month)
+        candidates.append((y, m, d, f"{str(d).zfill(2)}/{str(m).zfill(2)}/{y}"))
+
+    # MM/YYYY
+    for month, year in re.findall(r"\b(0[1-9]|1[0-2])[/-](\d{2,4})\b", text):
+        y = int(year)
+        if y < 100:
+            y += 2000 if y < 50 else 1900
+        m = int(month)
+        candidates.append((y, m, 1, f"{str(m).zfill(2)}/{y}"))
+
+    # MON-YYYY
+    for mon, year in re.findall(r"\b([A-Za-z]{3})[-/](\d{2,4})\b", text):
+        mon_num = month_map.get(mon.upper())
+        if mon_num is None:
+            continue
+        y = int(year)
+        if y < 100:
+            y += 2000 if y < 50 else 1900
+        candidates.append((y, mon_num, 1, f"{str(mon_num).zfill(2)}/{y}"))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    return candidates[0][3]
+
+
+def _extract_tax_rates_from_row_text(text: str) -> Tuple[Optional[float], Optional[float]]:
+    """Infer CGST/SGST rates from row text by preferring repeated low-percentage tokens."""
+    if not text:
+        return None, None
+
+    raw_tokens = re.findall(r"\d+(?:\.\d+)?", str(text))
+    values: List[float] = []
+    for token in raw_tokens:
+        try:
+            values.append(float(token))
+        except ValueError:
+            continue
+
+    rate_candidates = [v for v in values if 0 < v <= 28]
+    if not rate_candidates:
+        return None, None
+
+    rounded_counts: Dict[float, int] = defaultdict(int)
+    for val in rate_candidates:
+        rounded_counts[round(val, 2)] += 1
+
+    repeated = [(rate, cnt) for rate, cnt in rounded_counts.items() if cnt >= 2]
+    if repeated:
+        repeated.sort(key=lambda x: (x[1], x[0]), reverse=True)
+        chosen = repeated[0][0]
+        return _round2(chosen), _round2(chosen)
+
+    common_rates = [2.5, 5.0, 6.0, 9.0, 12.0, 14.0, 18.0, 28.0]
+    nearest = min(common_rates, key=lambda r: min(abs(v - r) for v in rate_candidates))
+    if min(abs(v - nearest) for v in rate_candidates) <= 0.6:
+        return _round2(nearest), _round2(nearest)
+
+    return None, None
+
+
+def _clean_product_description(product_text: Optional[str], row_values: Dict[str, str]) -> Optional[str]:
+    """Normalize product description and remove manufacturer/category prefix leakage."""
+    if not product_text:
+        return None
+
+    cleaned = re.sub(r'^\s*\d+\s*', '', str(product_text))
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' :-|')
+
+    mfg = str(row_values.get("mfg_name") or "").strip(" .:-|")
+    cat = str(row_values.get("category") or "").strip(" .:-|")
+
+    if mfg:
+        mfg_pattern = rf'^\s*{re.escape(mfg)}\.?\s+'
+        cleaned = re.sub(mfg_pattern, '', cleaned, flags=re.IGNORECASE)
+
+    if cat:
+        cat_pattern = rf'^\s*{re.escape(cat)}\s+'
+        cleaned = re.sub(cat_pattern, '', cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r'^\s*[+&]+\s*', '', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' :-|')
+    return cleaned or None
 
 
 def _extract_batch_from_text(text: str, hsn_code: Optional[str]) -> Optional[str]:
@@ -560,8 +813,79 @@ def _extract_total_amount_from_row_text(text: str) -> Optional[float]:
     if not values:
         return None
 
-    candidate = values[-1]
-    return _round2(candidate) if candidate > 0 else None
+    for candidate in reversed(values):
+        if candidate > 0:
+            return _round2(candidate)
+
+    return None
+
+
+def _extract_taxable_value_from_row_text(text: str) -> Optional[float]:
+    """Extract taxable value by locating the number immediately before first CGST rate token."""
+    if not text:
+        return None
+
+    matches = list(re.finditer(r"\d+(?:\.\d+)?", str(text)))
+    if len(matches) < 3:
+        return None
+
+    values: List[float] = []
+    for match in matches:
+        try:
+            values.append(float(match.group(0)))
+        except ValueError:
+            values.append(-1.0)
+
+    common_rates = {2.5, 5.0, 6.0, 9.0, 12.0, 14.0, 18.0, 28.0}
+    for idx, val in enumerate(values):
+        if round(val, 2) in common_rates and idx >= 1:
+            taxable = values[idx - 1]
+            if taxable > 0:
+                return _round2(taxable)
+
+    return None
+
+
+def _extract_discount_from_row_text(text: str) -> Optional[float]:
+    """Extract discount with OCR-noise tolerance, treating ').0' style tokens as 0.0."""
+    if not text:
+        return None
+
+    compact = re.sub(r"\s+", "", str(text))
+    if re.search(r"[\)\]]\.?0\b", compact):
+        return 0.0
+
+    label_match = re.search(r"\bDISC(?:OUNT)?\b\s*[:\-]?\s*([\)\]\(\[\d\.]+)", str(text), re.IGNORECASE)
+    if label_match:
+        token = re.sub(r"[^0-9\.]", "", label_match.group(1))
+        if token == "" or token == "0" or token == "0.0" or token == "00":
+            return 0.0
+        try:
+            val = float(token)
+            if 0 <= val <= 100:
+                return _round2(val)
+        except ValueError:
+            return None
+
+    # Prefer discount qty token that appears just before discount amount/taxable segment.
+    matches = list(re.finditer(r"\d+(?:\.\d+)?", str(text)))
+    values: List[float] = []
+    for match in matches:
+        try:
+            values.append(float(match.group(0)))
+        except ValueError:
+            continue
+
+    if len(values) >= 4:
+        common_rates = {2.5, 5.0, 6.0, 9.0, 12.0, 14.0, 18.0, 28.0}
+        for idx, val in enumerate(values):
+            if round(val, 2) in common_rates and idx >= 3:
+                discount_qty = values[idx - 3]
+                if 0 <= discount_qty <= 100:
+                    if abs(discount_qty - round(discount_qty)) < 0.01:
+                        return _round2(discount_qty)
+
+    return None
 
 
 def _normalize_text(text: str) -> str:
@@ -861,6 +1185,14 @@ def _normalize_line_item_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         else:
             normalized[tax_key] = _round2(tax_val_f)
 
+    # Keep GST rates within realistic percentage range.
+    for tax_key in ["cgst", "sgst"]:
+        tax_val = normalized.get(tax_key)
+        if tax_val is None:
+            continue
+        if not (0 <= float(tax_val) <= 28):
+            normalized[tax_key] = None
+
     for number_key in ["mrp", "ptr", "pts", "discount", "total_amount"]:
         val = normalized.get(number_key)
         if val is not None:
@@ -868,6 +1200,29 @@ def _normalize_line_item_fields(item: Dict[str, Any]) -> Dict[str, Any]:
                 normalized[number_key] = _round2(float(val))
             except (ValueError, TypeError):
                 normalized[number_key] = None
+
+    # Keep extracted taxable value; do not force qty*ptr because invoice quantity columns vary.
+
+    # Mandatory pricing hierarchy enforcement for every invoice item:
+    # MRP >= PTR >= PTS
+    mrp = normalized.get("mrp")
+    ptr = normalized.get("ptr")
+    pts = normalized.get("pts")
+
+    if mrp is not None and ptr is not None and pts is not None:
+        ordered = sorted([float(mrp), float(ptr), float(pts)], reverse=True)
+        normalized["mrp"] = _round2(ordered[0])
+        normalized["ptr"] = _round2(ordered[1])
+        normalized["pts"] = _round2(ordered[2])
+    elif mrp is not None and ptr is not None and float(ptr) > float(mrp):
+        normalized["mrp"] = _round2(float(ptr))
+        normalized["ptr"] = _round2(float(mrp))
+    elif ptr is not None and pts is not None and float(pts) > float(ptr):
+        normalized["ptr"] = _round2(float(pts))
+        normalized["pts"] = _round2(float(ptr))
+    elif mrp is not None and pts is not None and float(pts) > float(mrp):
+        normalized["mrp"] = _round2(float(pts))
+        normalized["pts"] = _round2(float(mrp))
 
     # Guard against shifted-column mistakes:
     # discount often gets copied from tax rates when discount column is blank.
@@ -879,6 +1234,18 @@ def _normalize_line_item_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         same_as_sgst = sgst is not None and abs(float(discount) - float(sgst)) < 0.01
         if same_as_cgst and (same_as_sgst or sgst is None):
             normalized["discount"] = None
+
+    if normalized.get("discount") is None:
+        normalized["discount"] = 0.0
+    else:
+        try:
+            discount_val = float(normalized["discount"])
+        except (ValueError, TypeError):
+            discount_val = 0.0
+
+        # Correct unrealistic discount leakage from neighboring columns.
+        if discount_val > 60 and normalized.get("mrp") is not None and normalized.get("ptr") is not None:
+            normalized["discount"] = 0.0
 
     # PTS should not mirror PTR/MRP exactly in shifted extraction scenarios.
     pts = normalized.get("pts")
@@ -1073,6 +1440,64 @@ def _extract_bill_to_block_lines(page_rows: List[List[Dict]]) -> List[str]:
     return lines
 
 
+def _extract_supplier_header_left_lines(page_rows: List[List[Dict]]) -> List[str]:
+    """Extract likely supplier-header lines from left side before customer-details section."""
+    lines: List[str] = []
+    bill_to_x1: Optional[float] = None
+
+    for row in page_rows:
+        for cell in row:
+            if re.search(r'\bBILL\s*TO\b|\bSHIP\s*TO\b', cell.get("text", ""), re.IGNORECASE):
+                x_val = cell.get("x1")
+                if isinstance(x_val, (int, float)):
+                    bill_to_x1 = x_val if bill_to_x1 is None else min(bill_to_x1, x_val)
+
+    for row in page_rows:
+        row_text = " ".join(c.get("text", "") for c in row).strip()
+        if not row_text:
+            continue
+
+        if re.search(r'PRODUCT\s*DESCRIPTION|HSN\s*CODE|BATCH\s*NO|TOTAL\s*AMOUNT', row_text, re.IGNORECASE):
+            break
+
+        sorted_row = sorted(row, key=lambda c: c.get("x1", 0))
+        if not sorted_row:
+            continue
+
+        if bill_to_x1 is not None:
+            left_cells = [c for c in sorted_row if c.get("x1", 0) < bill_to_x1 - 15]
+        else:
+            right_markers = [
+                c.get("x1", 0)
+                for c in sorted_row
+                if re.search(
+                    r'\bDL\s*NO\b|\bGSTIN\b|\bPAN\b|\bINVOICE\b|\bDUE\s*DATE\b|\bSTORE\s*TRN\b|\bAGAINST\s*ORDER\b|\bTYPE\s*OF\s*SALE\b',
+                    c.get("text", ""),
+                    re.IGNORECASE,
+                )
+            ]
+            if right_markers:
+                boundary = min(right_markers) - 20
+                left_cells = [c for c in sorted_row if c.get("x1", 0) < boundary]
+            else:
+                left_cells = sorted_row
+
+        if not left_cells:
+            continue
+
+        line = " ".join(c.get("text", "") for c in left_cells).strip()
+        line = re.sub(r'\s+', ' ', line)
+        if len(line) < 5:
+            continue
+
+        if re.search(r'ORIGINAL\s*FOR\s*BUYER|TAX\s*INVOICE', line, re.IGNORECASE):
+            continue
+
+        lines.append(line)
+
+    return lines
+
+
 def _extract_company_names_from_header(page_rows: List[List[Dict]]) -> List[str]:
     """Extract company names from header section (before bill-to section)."""
     header_rows: List[List[Dict]] = []
@@ -1083,6 +1508,39 @@ def _extract_company_names_from_header(page_rows: List[List[Dict]]) -> List[str]
         header_rows.append(row)
 
     search_rows = header_rows if header_rows else page_rows
+
+    # Priority pass: isolate left supplier header block and extract from that only.
+    header_left_lines = _extract_supplier_header_left_lines(search_rows)
+    if header_left_lines:
+        pseudo_rows: List[List[Dict]] = [
+            [{
+                "text": line,
+                "x1": 0,
+                "x2": 1,
+                "xc": 0,
+                "y1": 0,
+                "y2": 1,
+                "yc": 0,
+                "conf": 1.0,
+            }]
+            for line in header_left_lines
+        ]
+
+        strict_left = _extract_company_candidates(
+            pseudo_rows,
+            max_rows=10,
+            require_legal_suffix=True,
+        )
+        if strict_left:
+            return strict_left[:1]
+
+        relaxed_left = _extract_company_candidates(
+            pseudo_rows,
+            max_rows=10,
+            require_legal_suffix=False,
+        )
+        if relaxed_left:
+            return relaxed_left[:1]
 
     # Pass 1: strict legal-suffix extraction.
     strict_candidates = _extract_company_candidates(
@@ -1354,9 +1812,8 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
             if not current_item["product_description"]:
                 product_text = row_values.get("product_description")
                 if product_text and not re.search(r'PRODUCT|DESCRIPTION', product_text, re.IGNORECASE):
-                    product_text = re.sub(r'^\s*\d+\s*', '', product_text)
-                    product_text = re.sub(r'\s+', ' ', product_text).strip(' :-|')
-                    if re.search(r'[A-Za-z]{2,}', product_text):
+                    product_text = _clean_product_description(product_text, row_values)
+                    if product_text and re.search(r'[A-Za-z]{2,}', product_text):
                         current_item["product_description"] = cleaner.clean_string(product_text)
 
             if not current_item["batch_no"] and row_values.get("batch_no"):
@@ -1397,11 +1854,42 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                     if parsed is not None:
                         current_item[item_key] = _round2(parsed)
 
+            if current_item["discount"] is None:
+                parsed_discount = _extract_discount_from_row_text(row_text)
+                if parsed_discount is not None:
+                    current_item["discount"] = parsed_discount
+
+            # Prefer taxable value extraction for total_amount when available.
+            taxable_value = _extract_taxable_value_from_row_text(row_text)
+            if taxable_value is not None:
+                current_item["total_amount"] = taxable_value
+
+            # Improve GST parsing: prefer inferred repeated rate values from row text.
+            inferred_cgst, inferred_sgst = _extract_tax_rates_from_row_text(row_text)
+            if inferred_cgst is not None and inferred_sgst is not None:
+                current_cgst = current_item.get("cgst")
+                current_sgst = current_item.get("sgst")
+                need_override = (
+                    current_cgst is None
+                    or current_sgst is None
+                    or current_cgst > 28
+                    or current_sgst > 28
+                    or abs(float(current_cgst) - float(current_sgst)) > 0.5
+                )
+                if need_override:
+                    current_item["cgst"] = inferred_cgst
+                    current_item["sgst"] = inferred_sgst
+
             # Fallbacks from raw row text for key fields when column mapping misses.
             if current_item["expiry_date"] is None:
                 exp_fallback = _extract_expiry_from_text(row_text)
                 if exp_fallback:
                     current_item["expiry_date"] = exp_fallback
+
+            if current_item["expiry_date"] is not None:
+                normalized_exp = _extract_expiry_from_text(str(current_item["expiry_date"]))
+                if normalized_exp:
+                    current_item["expiry_date"] = normalized_exp
 
             if current_item["batch_no"] is None:
                 batch_fallback = _extract_batch_from_text(row_text, current_item.get("hsn_code"))
@@ -1413,10 +1901,19 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                 if pts_fallback is not None:
                     current_item["pts"] = pts_fallback
 
-            if current_item["total_amount"] is None:
-                total_fallback = _extract_total_amount_from_row_text(row_text)
-                if total_fallback is not None:
+            total_fallback = _extract_total_amount_from_row_text(row_text)
+            if total_fallback is not None:
+                if current_item["total_amount"] is None:
                     current_item["total_amount"] = total_fallback
+                else:
+                    try:
+                        mapped_total = float(current_item["total_amount"])
+                    except (ValueError, TypeError):
+                        mapped_total = 0.0
+
+                    # Keep taxable-value parse; only use row-end fallback if current looks invalid.
+                    if mapped_total <= 0:
+                        current_item["total_amount"] = total_fallback
 
             # Fallback for product name from continuation row text
             if not current_item["product_description"]:
@@ -1427,6 +1924,7 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                     cleaned_row,
                     re.IGNORECASE,
                 ):
+                    cleaned_row = _clean_product_description(cleaned_row, row_values) or cleaned_row
                     current_item["product_description"] = cleaner.clean_string(cleaned_row)
 
         if table_ended:
