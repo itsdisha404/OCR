@@ -1,4 +1,3 @@
-
 import sys
 import json
 import re
@@ -47,9 +46,7 @@ def load_dotenv_file(dotenv_path: Path) -> None:
 
 load_dotenv_file(BASE_DIR / ".env")
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION 1: CONSTANTS & CONFIGURATION
-# ════════════════════════════════════════════════════════════════════════════════
+#  SECTION 1: CONSTANTS & CONFIGURATION
 
 OCR_CONFIDENCE_THRESHOLD = 0.25
 MIN_BOX_COUNT = 30
@@ -58,22 +55,15 @@ MIN_BOX_COUNT = 30
 HEADER_FIELDS = [
     "company_name",
     "pan",
-    "gstin_no",
     "invoice_no",
     "invoice_date",
     "due_date",
-    "fssai_lic_no",
-    "dl_no",
 ]
 
 BILL_TO_FIELDS = [
     "name",
     "address",
-    "cust_gstin",
-    "cust_dl_no",
-    "dl_exp_date",
-    "po_ref",
-    "po_ref_date",
+    "date",
 ]
 
 LINE_ITEM_FIELDS = [
@@ -97,43 +87,43 @@ LINE_ITEM_FIELDS = [
 COLUMN_SYNONYMS = {
     "product_description": [
         "product", "description", "product description", "material description",
-        "item description", "product name"
+        "item description"
     ],
     "hsn_code": [
-        "hsn", "hsn code", "hsn/sac", "hsn no", "hsn number"
+        "hsn", "hsn code", "hsn/sac", "hsn no"
     ],
     "batch_no": [
-        "batch", "batch no", "batch number", "batch code", "lot", "lot no", "batch#"
+        "batch", "batch no", "batch number"
     ],
     "expiry_date": [
-        "expiry", "exp", "exp date", "expiry date", "mfg date", "exp dt"
+        "expiry", "exp", "exp date", "expiry date", "exp dt", "expiry dt", "E.X.P"
     ],
     "qty": [
-        "qty", "quantity", "billed qty", "sale qty", "ordered qty"
+        "qty", "quantity", "billed qty", "sale qty"
     ],
     "uom": [
-        "unit", "uom", "unit of measure", "pack size"
+        "unit", "uom"
     ],
     "mrp": [
-        "mrp", "m.r.p", "retail price"
+        "mrp", "m.r.p"
     ],
     "ptr": [
-        "ptr", "p.t.r", "retailer price"
+        "ptr", "p.t.r"
     ],
     "pts": [
-        "pts", "p.t.s", "stockist price", "pts price"
+        "pts"
     ],
     "discount": [
-        "discount", "disc", "disc%", "trade disc", "qty disc", "discount%"
+        "discount", "disc"
     ],
     "cgst": [
-        "cgst", "cgst%", "cgst rate"
+        "cgst"
     ],
     "sgst": [
-        "sgst", "sgst%", "sgst rate"
+        "sgst"
     ],
     "total_amount": [
-        "amount", "total", "net amount", "taxable", "total value", "line total"
+        "amount", "total", "net amount", "taxable"
     ]
 }
 
@@ -229,84 +219,54 @@ class AccuracyScorer:
     
     def score_item(self, item_dict: Dict[str, Any]) -> float:
         """
-        Calculate accuracy for a line item (0-100).
-        Scores: 60% required fields + 25% optional fields + 15% data quality.
+        Calculate accuracy for a line item.
+        Score based on:
+        - Non-null fields: 80%
+        - Field quality: 20%
         """
         if not item_dict:
             return 0.0
-
-        # Required fields (must-have for valid item)
-        required_fields = [
-            'product_description', 'hsn_code', 'qty', 'mrp', 'ptr'
-        ]
-        optional_fields = ['batch_no', 'pts', 'cgst', 'sgst', 'discount']
-        numeric_fields = ['qty', 'mrp', 'ptr', 'pts', 'cgst', 'sgst', 'discount']
-
-        # Required field completeness (60% weight)
-        non_null_required = sum(
-            1 for f in required_fields 
-            if item_dict.get(f) is not None
-        )
-        required_ratio = non_null_required / len(required_fields)
-        required_score = required_ratio * 60
-
-        # Optional field completeness (25% weight)
-        non_null_optional = sum(
-            1 for f in optional_fields
-            if item_dict.get(f) is not None
-        )
-        optional_ratio = non_null_optional / len(optional_fields) if optional_fields else 0.0
-        optional_score = optional_ratio * 25
-
-        # Data quality validation (15% weight)
-        quality_score = 1.0
         
-        # Type validation
+        # Critical fields for pharmaceutical items
+        critical_fields = [
+            'product_description', 'hsn_code', 'batch_no', 
+            'qty', 'mrp', 'pts', 'cgst', 'sgst'
+        ]
+        
+        # Count non-null critical fields
+        non_null_critical = sum(
+            1 for f in critical_fields 
+            if item_dict.get(f) is not None
+        )
+        
+        critical_ratio = non_null_critical / len(critical_fields)
+        
+        # Quality check: verify numeric fields are actually numbers
+        quality_score = 1.0
+        numeric_fields = ['qty', 'mrp', 'ptr', 'pts', 'cgst', 'sgst', 'igst', 'discount']
         for field in numeric_fields:
             val = item_dict.get(field)
             if val is not None and not isinstance(val, (int, float)):
-                quality_score -= 0.05
-
-        # Range validation for plausible values
-        qty = item_dict.get('qty')
-        if qty is not None:
-            try:
-                vf = float(qty)
-                if not (1 <= vf <= 10000):
-                    quality_score -= 0.05
-            except (ValueError, TypeError):
-                pass
-
-        for tax_field in ['cgst', 'sgst']:
-            val = item_dict.get(tax_field)
-            if val is not None:
-                try:
-                    vf = float(val)
-                    if not (0 <= vf <= 50):  # Realistic GST range
-                        quality_score -= 0.10
-                except (ValueError, TypeError):
-                    pass
-
-        for price_field in ['mrp', 'ptr', 'pts']:
-            val = item_dict.get(price_field)
-            if val is not None:
-                try:
-                    vf = float(val)
-                    if vf < 0 or vf > 100000:
-                        quality_score -= 0.05
-                except (ValueError, TypeError):
-                    pass
-
-        quality_score = max(0.0, min(15.0, quality_score * 15))
-        overall_accuracy = required_score + optional_score + quality_score
+                quality_score -= 0.1
+        
+        overall_accuracy = (critical_ratio * 80) + (quality_score * 20)
         return round(min(100, max(0, overall_accuracy)), 2)
     
     def score_section(self, section_data: Dict[str, Any]) -> float:
         """Score extraction for header or bill-to section"""
         if not section_data:
             return 0.0
-        
-        non_null_fields = sum(1 for v in section_data.values() if v is not None)
+
+        def is_present(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, str):
+                return bool(value.strip())
+            if isinstance(value, (list, tuple, set, dict)):
+                return len(value) > 0
+            return True
+
+        non_null_fields = sum(1 for v in section_data.values() if is_present(v))
         total_fields = len(section_data)
         
         if total_fields == 0:
@@ -433,6 +393,177 @@ def flatten_cells(rows: List[List[Dict]]) -> List[Dict]:
     return [cell for row in rows for cell in row]
 
 
+def _is_noise_label_value(text: Optional[str]) -> bool:
+    """Heuristic filter for words that are typically labels, not values."""
+    if not text:
+        return True
+
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", str(text).upper())
+    if not cleaned:
+        return True
+
+    noise_words = {
+        "PAN", "GSTIN", "DATE", "OFFICE", "INVOICE", "NO", "DUE",
+        "DL", "FSSAI", "REF", "PO", "ORDER", "NAME", "ADDRESS"
+    }
+    return cleaned in noise_words
+
+
+def _extract_labeled_value(
+    page_rows: List[List[Dict]],
+    label_pattern: str,
+    validator: Optional[Any] = None,
+) -> Tuple[Optional[str], float]:
+    """Extract value to the right of a matching label with optional validation."""
+    best_fallback: Tuple[Optional[str], float] = (None, 0.0)
+
+    for row in page_rows:
+        sorted_row = sorted(row, key=lambda c: c.get("x1", 0))
+        for idx, cell in enumerate(sorted_row):
+            label_text = cell.get("text", "")
+            if not re.search(label_pattern, label_text, re.IGNORECASE):
+                continue
+
+            label_x2 = cell.get("x2", 0)
+            right_cells = [
+                c for c in sorted_row[idx + 1:]
+                if c.get("x1", 0) >= label_x2 - 10
+            ]
+
+            for candidate in right_cells:
+                candidate_text = str(candidate.get("text", "")).strip(" :-|\t")
+                if not candidate_text or _is_noise_label_value(candidate_text):
+                    continue
+
+                if validator is None:
+                    return candidate_text, float(candidate.get("conf", 0.0))
+
+                try:
+                    if validator(candidate_text):
+                        return candidate_text, float(candidate.get("conf", 0.0))
+                except Exception:
+                    pass
+
+                if float(candidate.get("conf", 0.0)) > best_fallback[1]:
+                    best_fallback = (candidate_text, float(candidate.get("conf", 0.0)))
+
+    return best_fallback
+
+
+def _is_valid_pan_text(text: str) -> bool:
+    candidate = re.sub(r"[^A-Za-z0-9]", "", str(text).upper())
+    return bool(re.fullmatch(r"[A-Z]{5}\d{4}[A-Z]", candidate))
+
+
+def _is_valid_gstin_text(text: str) -> bool:
+    candidate = re.sub(r"[^A-Za-z0-9]", "", str(text).upper())
+    return bool(re.fullmatch(r"\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]", candidate))
+
+
+def _is_valid_invoice_no_text(text: str) -> bool:
+    candidate = str(text).strip()
+    if _is_noise_label_value(candidate):
+        return False
+    if len(candidate) < 3 or len(candidate) > 40:
+        return False
+    if DataCleaner.clean_date(candidate):
+        return False
+    return bool(re.search(r"\d", candidate))
+
+
+def _extract_expiry_from_text(text: str) -> Optional[str]:
+    """Extract expiry date in MM/YYYY-like forms from row text."""
+    if not text:
+        return None
+
+    mm_yyyy = re.search(r"\b(0[1-9]|1[0-2])[/-](\d{2,4})\b", text)
+    if mm_yyyy:
+        month, year = mm_yyyy.groups()
+        if len(year) == 2:
+            year = f"20{year}"
+        return f"{month}/{year}"
+
+    mon_yyyy = re.search(r"\b([A-Za-z]{3})[-/](\d{2,4})\b", text)
+    if mon_yyyy:
+        mon, year = mon_yyyy.groups()
+        if len(year) == 2:
+            year = f"20{year}"
+        return f"{mon.title()}-{year}"
+
+    return None
+
+
+def _extract_batch_from_text(text: str, hsn_code: Optional[str]) -> Optional[str]:
+    """Extract likely batch number from row text when column mapping misses it."""
+    if not text:
+        return None
+
+    tokens = re.findall(r"\b[A-Z0-9']{4,14}\b", str(text).upper())
+    hsn_code = str(hsn_code or "").strip().upper()
+    stop_tokens = {
+        "BATCH", "QTY", "MRP", "PTR", "PTS", "CGST", "SGST", "IGST", "TOTAL", "AMOUNT"
+    }
+
+    for token in tokens:
+        if token in stop_tokens:
+            continue
+        if hsn_code and token == hsn_code:
+            continue
+        if re.fullmatch(r"\d{8}", token):
+            continue
+        if re.fullmatch(r"\d{1,3}", token):
+            continue
+        if re.fullmatch(r"\d{6}", token):
+            continue
+        if re.search(r"[A-Z]", token) and re.search(r"\d", token):
+            return token
+
+    batch_hint = re.search(r"BATCH\s*[:\-]?\s*([A-Z0-9']{4,14})", str(text).upper())
+    if batch_hint:
+        hinted = batch_hint.group(1)
+        if hinted != hsn_code and not re.fullmatch(r"\d{8}", hinted):
+            return hinted
+
+    return None
+
+
+def _extract_pts_from_row_text(text: str) -> Optional[float]:
+    """Extract likely PTS value from text when PTS column exists but mapping missed."""
+    if not text:
+        return None
+
+    label_match = re.search(r"\bP\.?T\.?S\b\s*[:\-]?\s*(\d[\d,]*\.?\d*)", str(text), re.IGNORECASE)
+    if label_match:
+        try:
+            return _round2(float(label_match.group(1).replace(",", "")))
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_total_amount_from_row_text(text: str) -> Optional[float]:
+    """Pick likely total amount from a line-item row based on right-most numeric token."""
+    if not text:
+        return None
+
+    matches = re.findall(r"\d[\d,]*\.?\d*", str(text))
+    if len(matches) < 3:
+        return None
+
+    values: List[float] = []
+    for token in matches:
+        try:
+            values.append(float(token.replace(",", "")))
+        except ValueError:
+            continue
+
+    if not values:
+        return None
+
+    candidate = values[-1]
+    return _round2(candidate) if candidate > 0 else None
+
+
 def _normalize_text(text: str) -> str:
     """Normalize OCR text for fuzzy header matching."""
     normalized = re.sub(r'[^a-z0-9]+', ' ', str(text).lower())
@@ -440,33 +571,16 @@ def _normalize_text(text: str) -> str:
 
 
 def _match_column_from_text(text: str) -> Optional[str]:
-    """Map a header cell text to canonical column key using COLUMN_SYNONYMS.
-    
-    Uses both exact word boundary matching and substring matching for fuzzy variations.
-    """
-    if not text or not text.strip():
-        return None
-    
+    """Map a header cell text to canonical column key using COLUMN_SYNONYMS."""
     normalized = _normalize_text(text)
     if not normalized:
         return None
 
-    # Try exact word boundary matches first
     for col_name, synonyms in COLUMN_SYNONYMS.items():
         for synonym in synonyms:
             syn_norm = _normalize_text(synonym)
             if syn_norm and re.search(rf'\b{re.escape(syn_norm)}\b', normalized):
                 return col_name
-    
-    # Fallback: fuzzy substring match for partial headers (e.g., "PTS%" -> "pts")
-    for col_name, synonyms in COLUMN_SYNONYMS.items():
-        for synonym in synonyms:
-            syn_norm = _normalize_text(synonym).split()[0] if _normalize_text(synonym) else ""
-            # Match at least first 3 chars of synonym, or entire synonym if shorter
-            min_match_len = min(3, len(syn_norm)) if syn_norm else 0
-            if min_match_len > 0 and syn_norm[:min_match_len] in normalized:
-                return col_name
-    
     return None
 
 
@@ -495,41 +609,34 @@ def _detect_column_positions(all_page_rows: List[List[List[Dict]]]) -> Dict[str,
 
 
 def _assign_row_to_columns(row: List[Dict], col_positions: Dict[str, float]) -> Dict[str, str]:
-    """Assign OCR cells in a row to nearest detected columns using smarter overlap handling."""
+    """Assign OCR cells in a row to nearest detected columns."""
     if not col_positions:
         return {}
 
-    assigned: Dict[str, List[str]] = defaultdict(list)
     sorted_cols = sorted(col_positions.items(), key=lambda kv: kv[1])
-    sorted_cells = sorted(row, key=lambda c: c["xc"])
 
-    # Use a greedy left-to-right assignment to avoid overlapping cells
-    used_cols = set()
-    cell_to_col: Dict[int, str] = {}  # Map cell index to assigned column
+    def max_distance_for_col(col_name: str) -> float:
+        idx = next((i for i, (name, _) in enumerate(sorted_cols) if name == col_name), -1)
+        if idx == -1:
+            return 120.0
 
-    for cell_idx, cell in enumerate(sorted_cells):
+        x = sorted_cols[idx][1]
+        left_gap = x - sorted_cols[idx - 1][1] if idx > 0 else None
+        right_gap = sorted_cols[idx + 1][1] - x if idx < len(sorted_cols) - 1 else None
+        gaps = [g for g in [left_gap, right_gap] if g is not None and g > 0]
+        if not gaps:
+            return 120.0
+        return max(40.0, min(gaps) * 0.55)
+
+    assigned: Dict[str, List[str]] = defaultdict(list)
+    for cell in row:
         text = cell.get("text", "").strip()
         if not text:
             continue
 
-        # Find nearest unused column (prefer if not yet assigned)
-        best_col = None
-        best_dist = float('inf')
-
-        for col_name, col_x in sorted_cols:
-            dist = abs(cell["xc"] - col_x)
-            # Prefer unassigned columns; accept assigned if distance is much better
-            if col_name not in used_cols and dist < best_dist:
-                best_col = col_name
-                best_dist = dist
-            elif col_name in used_cols and dist < best_dist * 0.5:  # Significant improvement
-                best_col = col_name
-                best_dist = dist
-
-        if best_col:
-            used_cols.add(best_col)
-            assigned[best_col].append(text)
-            cell_to_col[cell_idx] = best_col
+        nearest_col, nearest_x = min(col_positions.items(), key=lambda kv: abs(cell["xc"] - kv[1]))
+        if abs(cell["xc"] - nearest_x) <= max_distance_for_col(nearest_col):
+            assigned[nearest_col].append(text)
 
     return {col: " ".join(parts).strip() for col, parts in assigned.items() if parts}
 
@@ -581,6 +688,8 @@ def _collect_table_rows_text(all_page_rows: List[List[List[Dict]]]) -> List[str]
 def refine_line_items_with_openrouter(
     line_items: List[Dict[str, Any]],
     table_rows_text: List[str],
+    header: Dict[str, Any],
+    bill_to: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     """Optionally refine OCR-extracted line items using OpenRouter LLM.
 
@@ -590,24 +699,61 @@ def refine_line_items_with_openrouter(
     if not api_key or not line_items:
         return line_items
 
-    model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+    model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
     endpoint = "https://openrouter.ai/api/v1/chat/completions"
 
     system_prompt = (
-        "You are an invoice line-item correction engine. "
-        "Return ONLY valid JSON array. "
-        "Keep same item count and row_index values. "
-        "Do not hallucinate values not inferable from provided rows. "
-        "Fields allowed: row_index, product_description, hsn_code, batch_no, expiry_date, qty, uom, "
-        "mrp, ptr, pts, discount, cgst, sgst, total_amount, accuracy_score."
+        "You are an expert pharmaceutical invoice line-item processor. Your task is to refine and correct "
+        "OCR-extracted invoice line items using the provided invoice header, bill-to details, and raw table text.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Return ONLY a valid JSON array - no explanations, no markdown, no code fences.\n"
+        "2. Maintain exact same item count and row_index values - do not add/remove/reorder items.\n"
+        "3. NEVER hallucinate values - only correct if clearly inferable from provided data.\n"
+        "4. Use null for any unknown/unrecoverable fields.\n\n"
+        "FIELD GUIDELINES:\n"
+        "- row_index: Keep unchanged (sequential identifier)\n"
+        "- product_description: Medical/pharma product names (e.g., 'ASPIRIN 500MG', 'COUGH SYRUP')\n"
+        "- hsn_code: 8-digit numeric code for pharmaceutical items\n"
+        "- batch_no: Alphanumeric batch identifier (e.g., 'B2024001')\n"
+        "- expiry_date: Format MM/YYYY or DD/MM/YYYY\n"
+        "- qty: Integer quantity (e.g., 10, 100, 500)\n"
+        "- uom: Unit of Measure (BOX, STRIP, BLISTER, PCS, PIECE, CARTON, etc.)\n"
+        "- mrp: Maximum Retail Price (positive decimal, typically 10-10000)\n"
+        "- ptr: Price to Retailer (positive decimal, typically 20-90% of MRP)\n"
+        "- pts: Price to Stockist (positive decimal, typically 10-80% of MRP)\n"
+        "- discount: Discount percentage (0-100, typically 0-50%)\n"
+        "- cgst: Central GST percentage (0-28%, common: 5%, 12%, 18%)\n"
+        "- sgst: State GST percentage (0-28%, same as CGST in India)\n"
+        "- total_amount: Line total after discounts and taxes (positive decimal)\n"
+        "- accuracy_score: Keep as provided or set to 0.0 if corrected\n\n"
+        "VALIDATION RULES:\n"
+        "- Quantity must be positive integer\n"
+        "- Prices (mrp, ptr, pts) must be positive and mrp >= ptr >= pts (usually)\n"
+        "- GST percentages must be 0-28 and equal (CGST = SGST in India)\n"
+        "- Discount must be 0-100 percent\n"
+        "- total_amount = (mrp * qty) - (discount/100 * mrp * qty) + taxes\n"
+        "- Dates must be valid and past/present (not future)\n"
     )
 
     user_prompt = {
+        "invoice_metadata": {
+            "company_name": header.get("company_name"),
+            "invoice_no": header.get("invoice_no"),
+            "invoice_date": header.get("invoice_date"),
+        },
+        "bill_to": {
+            "customer_name": bill_to.get("name"),
+            "customer_address": bill_to.get("address"),
+        },
         "instructions": [
-            "Correct numeric column assignments (mrp/ptr/pts/discount/cgst/sgst/total_amount).",
-            "Preserve product_description and hsn_code when already plausible.",
-            "Use null for unknown fields.",
-            "Keep same list length and order."
+            "Step 1: Review the invoice metadata (company, invoice#, date) for context.",
+            "Step 2: Use bill_to customer details to validate product relevance.",
+            "Step 3: Analyze table_rows_text to identify column positions and patterns.",
+            "Step 4: For each current_item, correct fields only if clearly supported by table data.",
+            "Step 5: Validate that prices follow: MRP >= PTR >= PTS (pharmaceutical pricing hierarchy).",
+            "Step 6: Ensure GST values are valid Indian tax rates (typically 5%, 12%, 18%, 28%).",
+            "Step 7: Cross-check totals: total_amount should align with (qty * price) and tax calculations.",
+            "Step 8: Return corrected items maintaining original structure and count."
         ],
         "table_rows_text": table_rows_text,
         "current_items": line_items,
@@ -708,7 +854,6 @@ def _normalize_line_item_fields(item: Dict[str, Any]) -> Dict[str, Any]:
             except (ValueError, TypeError):
                 total_f = 0.0
 
-            # Heuristic: realistic tax rate is usually <= 40; larger likely amount.
             if total_f > 0 and tax_val_f > 40:
                 normalized[tax_key] = _round2((tax_val_f / total_f) * 100)
             else:
@@ -723,6 +868,27 @@ def _normalize_line_item_fields(item: Dict[str, Any]) -> Dict[str, Any]:
                 normalized[number_key] = _round2(float(val))
             except (ValueError, TypeError):
                 normalized[number_key] = None
+
+    # Guard against shifted-column mistakes:
+    # discount often gets copied from tax rates when discount column is blank.
+    discount = normalized.get("discount")
+    cgst = normalized.get("cgst")
+    sgst = normalized.get("sgst")
+    if discount is not None and cgst is not None:
+        same_as_cgst = abs(float(discount) - float(cgst)) < 0.01
+        same_as_sgst = sgst is not None and abs(float(discount) - float(sgst)) < 0.01
+        if same_as_cgst and (same_as_sgst or sgst is None):
+            normalized["discount"] = None
+
+    # PTS should not mirror PTR/MRP exactly in shifted extraction scenarios.
+    pts = normalized.get("pts")
+    ptr = normalized.get("ptr")
+    mrp = normalized.get("mrp")
+    if pts is not None:
+        if ptr is not None and abs(float(pts) - float(ptr)) < 0.01:
+            normalized["pts"] = None
+        elif mrp is not None and abs(float(pts) - float(mrp)) < 0.01:
+            normalized["pts"] = None
 
     qty_val = normalized.get("qty")
     if qty_val is not None:
@@ -739,43 +905,241 @@ def normalize_line_items(line_items: List[Dict[str, Any]]) -> List[Dict[str, Any
     return [_normalize_line_item_fields(item) for item in line_items]
 
 
-def _improve_batch_extraction(row: List[Dict], current_hsn: Optional[str] = None) -> Optional[str]:
-    """
-    Improved batch number extraction from row cells.
-    Looks for alphanumeric patterns that resemble pharmaceutical batch codes.
-    Avoids HSN codes (8 digits) and date patterns.
-    Handles multi-part batches like "15*5" or "7's".
-    """
-    for cell in row:
-        text = cell.get("text", "").strip()
-        if not text or len(text) < 2:
+def _looks_like_company_name(text: str) -> bool:
+    """Check if text looks like a company name (not address, email, etc)."""
+    if not text or len(text.strip()) < 5:
+        return False
+
+    candidate = re.sub(r'\s+', ' ', str(text).strip())
+
+    exclude = re.compile(
+        r'(^EMAIL|^PHONE|^MOBILE|^FAX|^WEBSITE|^ADDRESS|^WAREHOUSE|'
+        r'FLOOR|BUILDING|PLOT|ROAD|STREET|CITY|STATE|PIN|VILLAGE|'
+        r'^INVOICE|^BILL|^SHIP|^CUSTOMER|ATTN|C/O|DIN|PAN|GSTIN|CIN NO|TAN|'
+        r'SUBJECT|REF|DATE|DOOR|HOUSE|APARTMENT|FLAT|SUITE)',
+        re.IGNORECASE,
+    )
+    if exclude.search(candidate):
+        return False
+
+    letters = re.sub(r'[^A-Za-z]', '', candidate)
+    if len(letters) < 4:
+        return False
+
+    # Avoid rows that are mostly IDs/vehicle/license style values.
+    if re.search(r'\b\d{2,}[A-Z]*\b', candidate) and len(letters) < 8:
+        return False
+
+    if re.search(r'\bDL\s*NO\b|\bGSTIN\b|\bPAN\b|\bINVOICE\b|\bDATE\b|\bIRN\b|\bVEHICLE\b', candidate, re.IGNORECASE):
+        return False
+
+    return True
+
+
+def _extract_company_candidates(
+    rows: List[List[Dict]],
+    max_rows: int = 25,
+    require_legal_suffix: bool = True,
+) -> List[str]:
+    """Extract company-name candidates with strict or relaxed legal-suffix mode."""
+    candidates: List[Tuple[float, str]] = []
+    legal_suffix = re.compile(
+        r'\b(PVT\.?\s*LTD\.?|PRIVATE\s+LIMITED|LIMITED|LTD\.?|LLP|LLC|INC\.?|CORP\.?|CORPORATION|'
+        r'ENTERPRISES?|TRADERS?|DISTRIBUTORS?|HOLDING|MANUFACTURING|PHARMA|CHEMICALS?|'
+        r'COMPANY|CO\.?|ASSOCIATES?|GROUP|SERVICES?|SOLUTIONS?|SYSTEMS?)\b',
+        re.IGNORECASE,
+    )
+
+    exclude_patterns = re.compile(
+        r'(^CIN\s+NO|EMAIL|ADDRESS|PHONE|MOBILE|FAX|WEBSITE|WAREHOUSE|OFFICE|'
+        r'FLOOR|BUILDING|PLOT|ROAD|STREET|CITY|STATE|PIN|GSTIN|PAN|TAN|'
+        r'INVOICE|BILL|SHIP|CUSTOMER\s*DETAILS?|SUBJECT|REF\.|DATE|DOOR|HOUSE|'
+        r'APARTMENT|FLAT|SUITE|ATTN|C/O|DIN|@|INV NO|IRN|TRANSPORT|VEHICLE|DL\s*NO|FSSAI)',
+        re.IGNORECASE,
+    )
+
+    for row_idx, row in enumerate(rows[:max_rows]):
+        row_text = ' '.join(c.get('text', '') for c in row).strip()
+        row_text = re.sub(r'\s+', ' ', row_text)
+        if not row_text or len(row_text) < 8:
             continue
 
-        # Skip if matches HSN code (pure 8 digits)
-        if re.fullmatch(r'\d{8}', text):
+        has_legal_suffix = bool(legal_suffix.search(row_text))
+        if require_legal_suffix and not has_legal_suffix:
             continue
 
-        # Skip pure date patterns or numeric decimals
-        if re.fullmatch(r'^\d+\.\d+$|^[A-Z]{3}-\d{4}$', text):
+        if exclude_patterns.search(row_text):
             continue
 
-        # Look for batch-like patterns:
-        # - Alphanumeric 3-12 chars with at least one letter
-        # - Or patterns like "15*5", "15'5", "ARF50025", etc.
-        batch_patterns = [
-            r'([A-Z][A-Z0-9]{2,11})',  # Letter first, alphanum after
-            r'(\d+[*\'\-]\d+)',  # e.g. "15*5" or "15'5"
-            r'([A-Z0-9]+[*\'\-][A-Z0-9]+)',  # Mixed with separator
-        ]
+        if not _looks_like_company_name(row_text):
+            continue
 
-        for pattern in batch_patterns:
-            batch_match = re.search(pattern, text.upper())
-            if batch_match:
-                candidate = batch_match.group(1).upper()
-                if len(candidate) >= 2 and not re.fullmatch(r'\d+', candidate):
-                    return candidate
+        special_count = len(re.findall(r'[^\w\s\.\-\&\']', row_text))
+        if special_count > 3:
+            continue
 
-    return None
+        letters = re.sub(r'[^A-Za-z]', '', row_text)
+        upper_letters = re.sub(r'[^A-Z]', '', row_text)
+        upper_ratio = (len(upper_letters) / len(letters)) if letters else 0.0
+
+        score = 0.0
+        score += max(0.0, 2.0 - (row_idx * 0.1))
+        if 10 <= len(row_text) <= 80:
+            score += 1.5
+        if 0.5 < upper_ratio < 0.95:
+            score += 1.0
+        elif upper_ratio >= 0.8:
+            score += 1.2
+
+        if has_legal_suffix:
+            score += 3.0
+        elif not require_legal_suffix:
+            score += 0.8
+
+        numbers = len(re.findall(r'\d', row_text))
+        if numbers > 3:
+            score -= 0.5
+
+        candidates.append((score, row_text))
+
+    if not candidates:
+        return []
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+
+    deduped: List[str] = []
+    seen_keys = set()
+    for _, text in candidates:
+        key = re.sub(r'[^A-Z0-9]', '', text.upper())
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(text)
+
+    return deduped
+
+
+def _extract_bill_to_block_lines(page_rows: List[List[Dict]]) -> List[str]:
+    """Extract only customer-details block lines from the left section of page."""
+    in_block = False
+    lines: List[str] = []
+    left_block_limit: Optional[float] = None
+
+    for row in page_rows:
+        row_text = " ".join(c.get("text", "") for c in row).strip()
+        if not row_text:
+            continue
+
+        if re.search(r'BILL\s*TO|SHIP\s*TO|CUSTOMER\s*DETAILS?', row_text, re.IGNORECASE):
+            in_block = True
+
+            right_markers = [
+                c.get("x1")
+                for c in row
+                if re.search(r'IRN|TYPE\s*OF\s*SALE|PLACE\s*OF\s*SALE|CUST\.?\s*ORDER', c.get("text", ""), re.IGNORECASE)
+            ]
+            if right_markers:
+                left_block_limit = min(right_markers) - 20
+            continue
+
+        if not in_block:
+            continue
+
+        if re.search(r'PRODUCT\s*DESCRIPTION|HSN|BATCH|QTY|TAXABLE|CGST|SGST|IGST', row_text, re.IGNORECASE):
+            break
+
+        if re.search(r'TOTAL\s*AMOUNT|GRAND\s*TOTAL|TERMS\s*&?\s*CONDITION', row_text, re.IGNORECASE):
+            break
+
+        if left_block_limit is not None:
+            left_cells = [c for c in row if c.get("x1", 0) < left_block_limit]
+        else:
+            left_cells = [c for c in row if c.get("x1", 0) < 900]
+
+        if not left_cells:
+            continue
+
+        line = " ".join(c.get("text", "") for c in left_cells).strip()
+        line = re.sub(r'\s+', ' ', line)
+        if not line:
+            continue
+
+        # Ignore known labels while keeping actual values.
+        if re.fullmatch(r'CUSTOMER\s*DETAILS\s*:?', line, flags=re.IGNORECASE):
+            continue
+
+        lines.append(line)
+
+    return lines
+
+
+def _extract_company_names_from_header(page_rows: List[List[Dict]]) -> List[str]:
+    """Extract company names from header section (before bill-to section)."""
+    header_rows: List[List[Dict]] = []
+    for row in page_rows:
+        row_text = " ".join(c.get("text", "") for c in row)
+        if re.search(r'BILL\s*TO|SHIP\s*TO|CUSTOMER.*ADDRESS|DELIVERY\s*ADDRESS', row_text, re.IGNORECASE):
+            break
+        header_rows.append(row)
+
+    search_rows = header_rows if header_rows else page_rows
+
+    # Pass 1: strict legal-suffix extraction.
+    strict_candidates = _extract_company_candidates(
+        search_rows,
+        max_rows=25,
+        require_legal_suffix=True,
+    )
+    if strict_candidates:
+        return strict_candidates[:1]
+
+    # Pass 2: relaxed fallback (no mandatory suffix).
+    relaxed_candidates = _extract_company_candidates(
+        search_rows,
+        max_rows=25,
+        require_legal_suffix=False,
+    )
+    if relaxed_candidates:
+        print("  [INFO] Company name extracted via relaxed fallback (no legal suffix detected)")
+        return relaxed_candidates[:1]
+
+    print("  [WARN] Company name could not be extracted from header")
+    return []
+
+
+def _extract_company_names_from_bill_to(page_rows: List[List[Dict]]) -> List[str]:
+    block_lines = _extract_bill_to_block_lines(page_rows)
+    if not block_lines:
+        return []
+
+    # Build pseudo-rows so we can reuse the existing scoring pipeline.
+    pseudo_rows: List[List[Dict]] = []
+    for line in block_lines:
+        pseudo_rows.append([
+            {
+                "text": line,
+                "x1": 0,
+                "x2": 1,
+                "xc": 0,
+                "y1": 0,
+                "y2": 1,
+                "yc": 0,
+                "conf": 1.0,
+            }
+        ])
+
+    names = _extract_company_candidates(pseudo_rows, max_rows=12, require_legal_suffix=False)[:3]
+    if names:
+        return names
+
+    # Fallback: first meaningful line with letters and no strong label pattern.
+    for line in block_lines:
+        if re.search(r'STATE\s*:?|GSTIN\s*:?|PAN\s*:?|DL\s*NO\s*:?|FSSAI\s*:?', line, re.IGNORECASE):
+            continue
+        if re.search(r'[A-Za-z]{4,}', line) and not re.search(r'\d{6,}', line):
+            return [line]
+
+    return []
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -783,80 +1147,55 @@ def _improve_batch_extraction(row: List[Dict], current_hsn: Optional[str] = None
 # ════════════════════════════════════════════════════════════════════════════════
 
 def extract_invoice_header(page_rows: List[List[Dict]]) -> Tuple[Dict, float]:
-    """
-    Extract invoice header information.
-    Always returns dict with all HEADER_FIELDS present (null if not found).
-    Returns: (header_dict, accuracy_score)
-    """
+   #Extract invoice header fields with guaranteed structure.
     flat = flatten_cells(page_rows)
     scorer = AccuracyScorer()
     cleaner = DataCleaner()
     
     # Initialize with all fields as None
     header = {field: None for field in HEADER_FIELDS}
+    header["company_name"] = None
     
     # ─── Company Name ──────────────────────────────────────────────────────
-    for cell in flat:
-        if re.search(r'ESSEN|CHHABRA|LUPIN|HEALTHCARE|MEDICARE', 
-                     cell["text"], re.IGNORECASE):
-            if len(cell["text"]) > 2:  # Avoid single chars
-                header["company_name"] = cleaner.clean_string(cell["text"])
-                break
-    
-    # ─── GSTIN (Supplier) ───────────────────────────────────────────────────
-    # Look for "GSTIN" label and take next value
-    gstin_text, gstin_conf = find_value_after_label(
-        flat, r'GSTIN\s*NO|GSTIN\s*No(?!\..*CUST)'
-    )
-    if gstin_text:
-        header["gstin_no"] = cleaner.extract_gstin(gstin_text)
+    company_names = _extract_company_names_from_header(page_rows)
+    if company_names:
+        header["company_name"] = cleaner.clean_string(company_names[0])
     
     # ─── PAN (Supplier) ────────────────────────────────────────────────────
-    # Get PAN that's NOT customer PAN
-    for i, cell in enumerate(flat):
-        if re.match(r'^PAN\s*$', cell["text"], re.IGNORECASE):
-            # Check context - shouldn't be after "CUST"
-            context = " ".join(c["text"] for c in flat[max(0, i-3):i])
-            if "cust" not in context.lower():
-                candidates = [
-                    c for c in flat[i+1:i+5]
-                    if c["text"] not in (":", "")
-                ]
-                if candidates:
-                    pan_val = max(candidates, key=lambda x: x["conf"])["text"]
-                    header["pan"] = cleaner.extract_pan(pan_val)
-                    break
+    pan_text, _ = _extract_labeled_value(
+        page_rows,
+        r'^PAN\s*$|\bPAN\b',
+        validator=_is_valid_pan_text,
+    )
+    if pan_text:
+        header["pan"] = cleaner.extract_pan(pan_text)
     
     # ─── Invoice Number ────────────────────────────────────────────────────
-    inv_no, _ = find_value_after_label(flat, r'INVOICE\s*NO|INV\.?\s*NO')
+    inv_no, _ = _extract_labeled_value(
+        page_rows,
+        r'INVOICE\s*NO|INV\.?\s*NO',
+        validator=_is_valid_invoice_no_text,
+    )
     if inv_no:
         header["invoice_no"] = cleaner.clean_invoice_no(inv_no)
     
     # ─── Invoice Date ────────────────────────────────────────────────────
-    inv_date, _ = find_value_after_label(flat, r'INVOICE\s*DATE|DATE.*[12]\d{3}')
+    inv_date, _ = _extract_labeled_value(
+        page_rows,
+        r'INVOICE\s*DATE|\bDATE\b',
+        validator=lambda t: DataCleaner.clean_date(t) is not None,
+    )
     if inv_date:
         header["invoice_date"] = cleaner.clean_date(inv_date)
     
     # ─── Due Date ────────────────────────────────────────────────────────
-    due_date, _ = find_value_after_label(flat, r'DUE\s*DATE')
+    due_date, _ = _extract_labeled_value(
+        page_rows,
+        r'DUE\s*DATE',
+        validator=lambda t: DataCleaner.clean_date(t) is not None,
+    )
     if due_date:
         header["due_date"] = cleaner.clean_date(due_date)
-    
-    # ─── FSSAI License ───────────────────────────────────────────────────
-    # Look for "FSSAI" label
-    fssai_text, _ = find_value_after_label(flat, r'FSSAI')
-    if fssai_text:
-        # Extract numbers only
-        fssai_nums = re.findall(r'\d{14}', fssai_text)
-        if fssai_nums:
-            header["fssai_lic_no"] = fssai_nums[0]
-    
-    # ─── DL Number ──────────────────────────────────────────────────────
-    dl_text, _ = find_value_after_label(flat, r'\bDL\s*NO\.?\s*[^:]|LICENSE\s*NO')
-    if dl_text:
-        # Clean up DL number
-        dl_clean = re.sub(r'[\s]+', ' ', dl_text).strip()
-        header["dl_no"] = dl_clean[:50] if dl_clean else None
     
     # Calculate accuracy
     accuracy = scorer.score_section(header)
@@ -874,67 +1213,39 @@ def extract_bill_to(page_rows: List[List[Dict]]) -> Tuple[Dict, float]:
     Always returns dict with all BILL_TO_FIELDS present (null if not found).
     Returns: (bill_to_dict, accuracy_score)
     """
-    flat = flatten_cells(page_rows)
     scorer = AccuracyScorer()
     cleaner = DataCleaner()
     
     # Initialize with all fields as None
     bill_to = {field: None for field in BILL_TO_FIELDS}
+    bill_to["name"] = []
     
-    # ─── Extract Bill-To Address Lines ──────────────────────────────────
-    addr_lines = []
-    in_bill_to = False
-    LEFT_MARGIN = 800  # Approximate left boundary
+    # ─── Extract Bill-To block lines ────────────────────────────────────
+    block_lines = _extract_bill_to_block_lines(page_rows)
     
-    for row in page_rows:
-        row_text = " ".join(c["text"] for c in row)
-        
-        if re.search(r'BILL\s*TO|SHIP\s*TO|CUSTOMER.*ADDRESS', row_text, re.IGNORECASE):
-            in_bill_to = True
-            continue
-        
-        if in_bill_to:
-            # Stop at table headers or summary sections
-            if re.search(r'PRODUCT|HSN|BATCH|QTY|TOTAL|AMOUNT|INVOICE|DUE', 
-                        row_text, re.IGNORECASE):
-                break
-            
-            # Collect address text from left side of page
-            left_cells = [c for c in row if c["x1"] < LEFT_MARGIN]
-            if left_cells:
-                line = " ".join(c["text"] for c in left_cells).strip()
-                if line and len(line) > 3:
-                    addr_lines.append(line)
+    bill_names = _extract_company_names_from_bill_to(page_rows)
+    bill_to["name"] = [n for n in (cleaner.clean_string(x) for x in bill_names) if n]
+
+    if block_lines:
+        filtered_lines = []
+        for line in block_lines:
+            if any(re.search(rf'^{re.escape(name)}$', line, re.IGNORECASE) for name in bill_to["name"]):
+                continue
+            if re.search(r'^(STATE|STATE\s*CODE|GSTIN\s*NO|PAN\s*NO|DL\s*NO|FSSAI\s*NO)\b', line, re.IGNORECASE):
+                continue
+            filtered_lines.append(line)
+
+        if filtered_lines:
+            bill_to["address"] = " ".join(filtered_lines)
     
-    if addr_lines:
-        bill_to["name"] = cleaner.clean_string(addr_lines[0]) if addr_lines else None
-        if len(addr_lines) > 1:
-            bill_to["address"] = " ".join(addr_lines[1:])
-    
-    # ─── Customer GSTIN ─────────────────────────────────────────────────
-    cust_gstin, _ = find_value_after_label(flat, r'CUST.*GSTIN|GSTIN.*CUST')
-    if cust_gstin:
-        bill_to["cust_gstin"] = cleaner.extract_gstin(cust_gstin)
-    
-    # ─── Customer DL ───────────────────────────────────────────────────
-    cust_dl, _ = find_value_after_label(flat, r'CUST.*D\.?L\.?|D\.?L\.?.*CUST')
-    if cust_dl:
-        bill_to["cust_dl_no"] = cleaner.clean_string(cust_dl)
-    
-    # ─── DL Expiry Date ───────────────────────────────────────────────
-    dl_exp, _ = find_value_after_label(flat, r'DL.*EXP|EXP.*DATE')
-    if dl_exp:
-        bill_to["dl_exp_date"] = cleaner.clean_date(dl_exp)
-    
-    # ─── PO Reference ──────────────────────────────────────────────────
-    po_ref, _ = find_value_after_label(flat, r'PO\s*REF|ORDER\s*NO')
-    if po_ref:
-        bill_to["po_ref"] = cleaner.clean_string(po_ref)
-    
-    # ─── PO Date ────────────────────────────────────────────────────────
-    po_date, _ = find_value_after_label(flat, r'PO.*DATE|ORDER.*DATE')
-    if po_date:
-        bill_to["po_ref_date"] = cleaner.clean_date(po_date)
+    # ─── Bill Date (PO/Order date if available) ─────────────────────────
+    bill_date, _ = _extract_labeled_value(
+        page_rows,
+        r'PO.*DATE|ORDER.*DATE',
+        validator=lambda t: DataCleaner.clean_date(t) is not None,
+    )
+    if bill_date:
+        bill_to["date"] = cleaner.clean_date(bill_date)
     
     # Calculate accuracy
     accuracy = scorer.score_section(bill_to)
@@ -956,6 +1267,7 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
     cleaner = DataCleaner()
 
     col_positions = _detect_column_positions(all_page_rows)
+    detected_cols = set(col_positions.keys())
     print(f"  Detected item columns: {sorted(col_positions.keys())}")
 
     items = []
@@ -1049,20 +1361,9 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
 
             if not current_item["batch_no"] and row_values.get("batch_no"):
                 batch_text = row_values.get("batch_no")
-                # Clean batch text: remove trailing numbers that look like prices
-                batch_text = re.sub(r'\s+\d+\.\d+\s*$', '', batch_text)
-                batch_match = re.search(r'([A-Z0-9\*\'\-]{2,12})', str(batch_text).upper())
+                batch_match = re.search(r'[A-Z0-9\']{4,12}', str(batch_text).upper())
                 if batch_match:
-                    candidate = batch_match.group(1)
-                    # Validate: not pure digits, not date-like
-                    if not re.fullmatch(r'\d+', candidate) and not re.fullmatch(r'[A-Z]{3}-\d{4}', candidate):
-                        current_item["batch_no"] = candidate
-
-            # Fallback: extract batch directly from row if column mapping failed
-            if not current_item["batch_no"]:
-                fallback_batch = _improve_batch_extraction(row, current_item.get("hsn_code"))
-                if fallback_batch:
-                    current_item["batch_no"] = fallback_batch
+                    current_item["batch_no"] = batch_match.group(0)
 
             if not current_item["expiry_date"] and row_values.get("expiry_date"):
                 exp_text = row_values.get("expiry_date")
@@ -1089,35 +1390,33 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                 "total_amount": "total_amount",
             }
             for col_name, item_key in numeric_field_map.items():
+                if col_name not in detected_cols:
+                    continue
                 if current_item[item_key] is None and row_values.get(col_name):
                     parsed = cleaner.extract_number(row_values.get(col_name))
                     if parsed is not None:
-                        # Validate: discount and tax should be < 100, prices typically < 5000
-                        if col_name in ["discount", "cgst", "sgst"]:
-                            if parsed > 100:
-                                continue  # Likely not this field
                         current_item[item_key] = _round2(parsed)
 
-            # Fallback extraction for missing PTS and DISCOUNT from raw row text
-            if current_item["pts"] is None or current_item["discount"] is None:
-                all_numbers = re.findall(r'\d+\.?\d*', row_text)
-                # Extract numeric values in order: assume pricing order is roughly
-                # qty, mrp, ptr, pts, discount, cgst, sgst, amount
-                if len(all_numbers) >= 7 and current_item["pts"] is None:
-                    try:
-                        pts_candidate = float(all_numbers[3])  # Heuristic: 4th number
-                        if 0 < pts_candidate <= 10000:
-                            current_item["pts"] = _round2(pts_candidate)
-                    except (ValueError, IndexError):
-                        pass
+            # Fallbacks from raw row text for key fields when column mapping misses.
+            if current_item["expiry_date"] is None:
+                exp_fallback = _extract_expiry_from_text(row_text)
+                if exp_fallback:
+                    current_item["expiry_date"] = exp_fallback
 
-                if len(all_numbers) >= 5 and current_item["discount"] is None:
-                    try:
-                        disc_candidate = float(all_numbers[4])  # Heuristic: 5th number
-                        if 0 < disc_candidate <= 100:
-                            current_item["discount"] = _round2(disc_candidate)
-                    except (ValueError, IndexError):
-                        pass
+            if current_item["batch_no"] is None:
+                batch_fallback = _extract_batch_from_text(row_text, current_item.get("hsn_code"))
+                if batch_fallback:
+                    current_item["batch_no"] = batch_fallback
+
+            if current_item["pts"] is None and "pts" in detected_cols:
+                pts_fallback = _extract_pts_from_row_text(row_text)
+                if pts_fallback is not None:
+                    current_item["pts"] = pts_fallback
+
+            if current_item["total_amount"] is None:
+                total_fallback = _extract_total_amount_from_row_text(row_text)
+                if total_fallback is not None:
+                    current_item["total_amount"] = total_fallback
 
             # Fallback for product name from continuation row text
             if not current_item["product_description"]:
@@ -1185,7 +1484,7 @@ def process_pdf(pdf_path: str) -> Dict[str, Any]:
     line_items, item_accs = extract_line_items(page_rows)
 
     table_rows_text = _collect_table_rows_text(page_rows)
-    line_items = refine_line_items_with_openrouter(line_items, table_rows_text)
+    line_items = refine_line_items_with_openrouter(line_items, table_rows_text, header, bill_to)
     line_items = normalize_line_items(line_items)
     
     print(f"  ✓ Header extracted (accuracy: {header_acc}%)")
