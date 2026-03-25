@@ -24,7 +24,7 @@ BASE_DIR = Path(__file__).parent
 
 
 def load_dotenv_file(dotenv_path: Path) -> None:
-    """Load KEY=VALUE pairs from .env into process environment."""
+   
     if not dotenv_path.exists():
         return
 
@@ -77,8 +77,6 @@ LINE_ITEM_FIELDS = [
     "mrp",
     "ptr",
     "pts",
-    "tp_value",
-    "scheme_value",
     "discount",
     "cgst",
     "sgst",
@@ -89,7 +87,7 @@ LINE_ITEM_FIELDS = [
 COLUMN_SYNONYMS = {
     "product_description": [
         "product", "description", "product description", "material description",
-        "item description", "item", "material"
+        "item description"
     ],
     "hsn_code": [
         "hsn", "hsn code", "hsn/sac", "hsn no"
@@ -98,7 +96,7 @@ COLUMN_SYNONYMS = {
         "batch", "batch no", "batch number"
     ],
     "expiry_date": [
-        "expiry", "exp", "exp date", "expiry date", "exp dt", "expiry dt", "E.X.P"
+        "expiry", "exp", "exp date", "expiry date"
     ],
     "qty": [
         "qty", "quantity", "billed qty", "sale qty"
@@ -115,14 +113,8 @@ COLUMN_SYNONYMS = {
     "pts": [
         "pts"
     ],
-    "tp_value": [
-        "tp value", "tp val", "tp amount"
-    ],
-    "scheme_value": [
-        "scheme value", "scheme val", "scheme amount", "scheme"
-    ],
     "discount": [
-        "discount", "disc", "td", "trade discount", "td%", "trade disc"
+        "discount", "disc"
     ],
     "cgst": [
         "cgst"
@@ -131,8 +123,7 @@ COLUMN_SYNONYMS = {
         "sgst"
     ],
     "total_amount": [
-        "transaction value", "trans value", "transaction amount", "trans amount",
-        "final amount", "net amount", "line total", "amount", "total"
+        "amount", "total", "net amount", "taxable"
     ]
 }
 
@@ -252,7 +243,7 @@ class AccuracyScorer:
         
         # Quality check: verify numeric fields are actually numbers
         quality_score = 1.0
-        numeric_fields = ['qty', 'mrp', 'ptr', 'pts', 'tp_value', 'scheme_value', 'cgst', 'sgst', 'igst', 'discount']
+        numeric_fields = ['qty', 'mrp', 'ptr', 'pts', 'cgst', 'sgst', 'igst', 'discount']
         for field in numeric_fields:
             val = item_dict.get(field)
             if val is not None and not isinstance(val, (int, float)):
@@ -550,104 +541,27 @@ def _extract_pts_from_row_text(text: str) -> Optional[float]:
     return None
 
 
-def _is_valid_hsn_context(text: str, hsn_code: str) -> bool:
-    """Validate that HSN code appears in a valid product context, not address/phone."""
-    if not text or not hsn_code:
-        return False
-
-    text_lower = text.lower()
-
-    # Skip if context contains clear address indicators
-    address_indicators = [
-        'ph no:', 'phone:', 'tel:', 'contact:',
-        'email:', 'www.', '@',
-        'pvt ltd', 'private limited',
-        'gstin:', 'pan no:', 'dl no:',
-        'industrial area', 'ganj industrial'
-    ]
-
-    for indicator in address_indicators:
-        if indicator in text_lower:
-            return False
-
-    # Skip if HSN is clearly part of a phone number pattern
-    phone_patterns = [
-        rf'\b0\d{{2,3}}\-{hsn_code}',  # 011-42419902 pattern
-        rf'{hsn_code}\/9\d{{9}}',      # Phone with HSN prefix and 9xxxxxxxx
-        rf'ph\s*no[\s:]*.*{hsn_code}', # "Ph No: ..." containing HSN
-    ]
-
-    for pattern in phone_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
-            return False
-
-    # If we get here and there are any product-like indicators, it's valid
-    product_indicators = [
-        'batch', 'exp', 'qty', 'box', 'tab', 'cap', 'mg', 'ml', 'gm',
-        'mrp', 'ptr', 'pts', 'pack', 'strip', 'bottle', 'vial', 't)', 'tablet'
-    ]
-
-    has_product_context = any(indicator in text_lower for indicator in product_indicators)
-    if has_product_context:
-        return True
-
-    # More lenient check - if there's text before HSN that looks like a product
-    # and it's not obviously an address, allow it
-    pre_hsn_text = text.split(hsn_code)[0].strip()
-    if pre_hsn_text:
-        # Remove leading numbers and clean up
-        product_text = re.sub(r'^\s*\d+\s*', '', pre_hsn_text).strip()
-        # If there's meaningful text (not just punctuation/spaces), consider it valid
-        if len(product_text) >= 2 and re.search(r'[A-Za-z]{2,}', product_text):
-            return True
-
-    # If HSN appears with other numbers that look like product data, allow it
-    numbers_in_text = re.findall(r'\d+(?:\.\d+)?', text)
-    if len(numbers_in_text) >= 3:  # HSN + at least 2 other numbers (qty, prices, etc.)
-        return True
-
-    return False
-
-
 def _extract_total_amount_from_row_text(text: str) -> Optional[float]:
-    """Extract transaction value from the rightmost column only.
-    Avoids extracting from multiple columns."""
+    """Pick likely total amount from a line-item row based on right-most numeric token."""
     if not text:
         return None
 
-    # Find ALL complete numeric values followed by space and uppercase letter
-    # Then pick the rightmost one (which is the transaction value column)
-    pattern = r'(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)\s+[A-Z]'
-    matches = list(re.finditer(pattern, text))
+    matches = re.findall(r"\d[\d,]*\.?\d*", str(text))
+    if len(matches) < 3:
+        return None
 
-    if matches:
-        # Get the last match (rightmost)
-        rightmost_match = matches[-1]
+    values: List[float] = []
+    for token in matches:
         try:
-            value = float(rightmost_match.group(1).replace(",", ""))
-            if 50.0 <= value <= 100000:
-                return _round2(value)
+            values.append(float(token.replace(",", "")))
         except ValueError:
-            pass
+            continue
 
-    # Fallback: Look for explicit transaction/total value labels
-    transaction_patterns = [
-        r'(?:transaction|trans)\s*(?:value|val)[\s\-:]*(\d[\d,]*\.?\d*)',
-        r'(\d[\d,]*\.?\d*)\s*transaction',
-        r'final\s*(?:amount|value)[\s\-:]*(\d[\d,]*\.?\d*)',
-    ]
+    if not values:
+        return None
 
-    for pattern in transaction_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            try:
-                value = float(match.group(1).replace(",", ""))
-                if 10.0 <= value <= 100000:
-                    return _round2(value)
-            except ValueError:
-                continue
-
-    return None
+    candidate = values[-1]
+    return _round2(candidate) if candidate > 0 else None
 
 
 def _normalize_text(text: str) -> str:
@@ -670,71 +584,20 @@ def _match_column_from_text(text: str) -> Optional[str]:
     return None
 
 
-def _extract_columns_from_complex_header(text: str, cell_x: float, cell_width: float = 100.0) -> Dict[str, float]:
-    """Extract multiple column matches from a complex header cell with estimated positions."""
-    normalized = _normalize_text(text)
-    if not normalized:
-        return {}
-
-    matches = {}
-
-    # Find all column matches with their positions in the text
-    for col_name, synonyms in COLUMN_SYNONYMS.items():
-        for synonym in synonyms:
-            syn_norm = _normalize_text(synonym)
-            if syn_norm:
-                match = re.search(rf'\b{re.escape(syn_norm)}\b', normalized)
-                if match:
-                    # Calculate estimated x position based on match position within text
-                    text_pos_ratio = (match.start() + len(match.group())) / len(normalized)
-                    estimated_x = cell_x + (text_pos_ratio * cell_width * 0.7)  # 0.7 factor for text spacing
-                    matches[col_name] = estimated_x
-                    break  # Only take first synonym match per column
-
-    return matches
-
-
 def _detect_column_positions(all_page_rows: List[List[List[Dict]]]) -> Dict[str, float]:
     """Detect column x-positions from table header rows using synonyms."""
     best_positions: Dict[str, float] = {}
-    header_debug_info = []
 
     for page_rows in all_page_rows:
         for row in page_rows:
             row_matches: Dict[str, float] = {}
-            row_debug = []
-
             for cell in row:
-                cell_text = cell.get("text", "")
-                cell_x = cell.get("xc", 0.0)
-                cell_width = cell.get("width", 100.0)
-
-                # Try single column match first
-                col = _match_column_from_text(cell_text)
+                col = _match_column_from_text(cell.get("text", ""))
                 if col and col not in row_matches:
-                    row_matches[col] = cell_x
-                    row_debug.append(f"'{cell_text}' -> {col}")
-
-                # Try multi-column extraction for complex headers
-                multi_matches = _extract_columns_from_complex_header(cell_text, cell_x, cell_width)
-                for col_name, estimated_x in multi_matches.items():
-                    if col_name not in row_matches:
-                        row_matches[col_name] = estimated_x
-                        row_debug.append(f"'{cell_text}' -> {col_name} (multi)")
-
-            # Debug output for header analysis
-            if len(row_matches) >= 2:
-                header_debug_info.append({
-                    'row_text': ' '.join(c.get('text', '') for c in row),
-                    'matches': dict(row_matches),
-                    'debug': row_debug
-                })
+                    row_matches[col] = cell["xc"]
 
             # Strong header row signal
             if len(row_matches) >= 4 and ("product_description" in row_matches or "hsn_code" in row_matches):
-                print(f"  📋 Found strong header row with {len(row_matches)} columns:")
-                for col, x in sorted(row_matches.items(), key=lambda kv: kv[1]):
-                    print(f"    {col}: x={x}")
                 return row_matches
 
             # Weak fallback accumulation
@@ -742,25 +605,11 @@ def _detect_column_positions(all_page_rows: List[List[List[Dict]]]) -> Dict[str,
                 if col not in best_positions:
                     best_positions[col] = x
 
-    # If no strong header found, use accumulated positions
-    if best_positions:
-        print(f"  📋 Using accumulated column positions ({len(best_positions)} columns):")
-        for col, x in sorted(best_positions.items(), key=lambda kv: kv[1]):
-            print(f"    {col}: x={x}")
-
-    # Debug: show header analysis
-    if header_debug_info:
-        print(f"  🔍 Header analysis found {len(header_debug_info)} potential header rows")
-        for i, info in enumerate(header_debug_info[:2], 1):  # Show first 2
-            print(f"    Row {i}: {len(info['matches'])} columns - {info['row_text'][:50]}...")
-            if 'total_amount' in info['matches']:
-                print(f"      → total_amount detected at x={info['matches']['total_amount']}")
-
     return best_positions
 
 
 def _assign_row_to_columns(row: List[Dict], col_positions: Dict[str, float]) -> Dict[str, str]:
-    """Assign OCR cells in a row to nearest detected columns with improved rightmost detection."""
+    """Assign OCR cells in a row to nearest detected columns."""
     if not col_positions:
         return {}
 
@@ -777,59 +626,16 @@ def _assign_row_to_columns(row: List[Dict], col_positions: Dict[str, float]) -> 
         gaps = [g for g in [left_gap, right_gap] if g is not None and g > 0]
         if not gaps:
             return 120.0
-
-        # For total_amount (rightmost column), be more lenient to capture full values
-        if col_name == "total_amount":
-            return max(60.0, min(gaps) * 0.8)  # Increased tolerance for rightmost column
-
         return max(40.0, min(gaps) * 0.55)
 
     assigned: Dict[str, List[str]] = defaultdict(list)
-
-    # Special handling for total_amount - look for rightmost numeric values
-    if "total_amount" in col_positions:
-        total_amount_x = col_positions["total_amount"]
-
-        # Find cells that are near or to the right of the total_amount column
-        rightmost_cells = []
-        for cell in row:
-            cell_x = cell.get("xc", 0)
-            cell_text = cell.get("text", "").strip()
-
-            # Look for cells with numeric values near/right of total_amount column
-            if (cell_x >= total_amount_x - 100 and  # Allow some left tolerance
-                re.search(r'\d[\d,]*\.?\d*', cell_text) and  # Contains numbers
-                not re.search(r'^[A-Z]{2,}$|^(BATCH|QTY|BOX|TAB|CAP|MG)$', cell_text, re.IGNORECASE)):  # Not just labels
-                rightmost_cells.append((cell_x, cell_text))
-
-        # Sort by x position and pick the rightmost numeric cell
-        if rightmost_cells:
-            rightmost_cells.sort(key=lambda x: x[0])
-            rightmost_text = rightmost_cells[-1][1]  # Rightmost cell
-            assigned["total_amount"].append(rightmost_text)
-
-    # Regular assignment for other columns
     for cell in row:
         text = cell.get("text", "").strip()
         if not text:
             continue
 
-        # Skip if already assigned to total_amount
-        if "total_amount" in assigned and text in assigned["total_amount"]:
-            continue
-
         nearest_col, nearest_x = min(col_positions.items(), key=lambda kv: abs(cell["xc"] - kv[1]))
         if abs(cell["xc"] - nearest_x) <= max_distance_for_col(nearest_col):
-            # Avoid double-assigning transaction values to other columns
-            if (nearest_col != "total_amount" and
-                re.match(r'^\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?$', text)):  # Looks like transaction value
-                try:
-                    value = float(text.replace(",", ""))
-                    if value > 500:  # Large amounts likely transaction values
-                        continue  # Skip assigning large amounts to non-total columns
-                except ValueError:
-                    pass  # If can't parse as number, continue with normal assignment
-
             assigned[nearest_col].append(text)
 
     return {col: " ".join(parts).strip() for col, parts in assigned.items() if parts}
@@ -879,11 +685,275 @@ def _collect_table_rows_text(all_page_rows: List[List[List[Dict]]]) -> List[str]
     return rows_text
 
 
+def _is_valid_company_name(name: Optional[str]) -> bool:
+    """
+    Validate that a string is a legitimate company name and not a label/identifier.
+    Rejects common label patterns like 'CIN NO_', 'DL NO_', 'GSTIN', 'PAN NO_', etc.
+    """
+    if not name or not isinstance(name, str):
+        return False
+
+    name = name.strip()
+    if not name:
+        return False
+
+    name_upper = name.upper()
+
+    # List of patterns that indicate this is a label, not a company name
+    invalid_patterns = [
+        r'^CIN\s*NO',      # CIN NO, CIN NO_
+        r'^DL\s*NO',       # DL NO, DL NO_
+        r'^GSTIN',         # GSTIN
+        r'^PAN\s*NO',      # PAN NO
+        r'^PAN:',          # PAN: xxx
+        r'^TAN',           # TAN
+        r'^FSSAI',         # FSSAI
+        r'^IEC\s*CODE',    # IEC CODE
+        r'^IEC\s*NO',      # IEC NO
+        r'^REG\s*NO',      # REG NO
+        r'^REG\s*CODE',    # REG CODE
+        r'^LICENSE',       # LICENSE
+        r'^LICENCE',       # LICENCE
+        r'^AUTH',          # AUTH
+        r'^CERT',          # CERT
+        r'^CODE\s*NO',     # CODE NO
+        r'^ID\s*NO',       # ID NO
+        r'^NO\.',          # NO. (standalone)
+    ]
+
+    for pattern in invalid_patterns:
+        if re.match(pattern, name_upper):
+            return False
+
+    # Must start with a letter OR have at least 4 letters (to avoid "123ABC" type strings)
+    starts_with_letter = re.match(r'^[a-zA-Z]', name)
+    has_min_letters = len(re.findall(r'[a-zA-Z]', name)) >= 4
+
+    if not (starts_with_letter or has_min_letters):
+        return False
+
+    return True
+
+
+def refine_header_with_openrouter(
+    header: Dict[str, Any],
+    bill_to: Dict[str, Any],
+    line_items: List[Dict[str, Any]],
+    ocr_text_sample: str,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Refine OCR-extracted header and bill-to using OpenRouter LLM.
+    Uses full context including line items to intelligently segregate metadata.
+    """
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return header, bill_to
+
+    model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+    endpoint = "https://openrouter.ai/api/v1/chat/completions"
+
+    # Prepare line items summary for context
+    line_items_summary = []
+    for i, item in enumerate(line_items[:5]):  # First 5 items for context
+        summary = {
+            "product": item.get("product_description"),
+            "hsn": item.get("hsn_code"),
+            "qty": item.get("qty"),
+            "mrp": item.get("mrp"),
+            "pts": item.get("pts"),
+        }
+        line_items_summary.append(summary)
+
+    system_prompt = (
+        "You are an expert invoice header parser. Your task is to intelligently analyze and refine "
+        "OCR-extracted invoice header data by segregating supplier company name from customer company name, "
+        "addresses, and other metadata.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Return ONLY a valid JSON object - no explanations, markdown, or code fences.\n"
+        "2. SUPPLIER COMPANY (header.company_name): Usually appears at TOP of invoice with legal suffix (PVT LTD, LIMITED, etc)\n"
+        "3. CUSTOMER COMPANY (bill_to.name): Appears in 'BILL TO', 'SHIP TO', or 'CUSTOMER DETAILS' section\n"
+        "4. NEVER use addresses as company names - avoid: PLOT, ROAD, STREET, AREA, GANJ, SECTOR, INDUSTRIAL, etc.\n"
+        "5. NEVER use registration/license identifiers as company names - reject: CIN NO, DL NO, GSTIN, PAN NO, TAN, FSSAI, IEC, LICENSE, CERT, REG NO, etc.\n"
+        "6. Use provided line_items context (products, HSN codes) to understand document domain\n"
+        "7. Extract exact values from OCR text when possible\n"
+        "8. Use null for any field you cannot reliably extract\n"
+        "9. Return company names as simple strings (name) and address as single string (address)\n"
+        "10. If you find only fragments or label patterns where company name should be, return null for that field.\n\n"
+        "REQUIRED OUTPUT FORMAT:\n"
+        "{\n"
+        '  "header": {\n'
+        '    "company_name": "SUPPLIER COMPANY NAME PVT LTD",\n'
+        '    "pan": "AAFFE3923M",\n'
+        '    "invoice_no": "INV/2024/12345",\n'
+        '    "invoice_date": "13/11/2024",\n'
+        '    "due_date": "28/11/2024"\n'
+        "  },\n"
+        '  "bill_to": {\n'
+        '    "name": "CUSTOMER COMPANY NAME PVT LTD",\n'
+        '    "address": "PLOT NO 321, SECTOR 10, DELHI 110092, PAN: AAHCC7397L, DL NO: 2B/DLIPTG/123962",\n'
+        '    "date": null\n'
+        "  }\n"
+        "}\n"
+    )
+
+    user_prompt = {
+        "instructions": [
+            "Step 1: Identify the SUPPLIER (top of invoice, usually company name with legal suffix like PVT LTD/LIMITED).",
+            "Step 2: Identify the CUSTOMER (from Bill To/Ship To/Customer Details section).",
+            "Step 3: Separate ADDRESSES from COMPANY NAMES - addresses contain: PLOT, ROAD, STREET, ROAD, INDUSTRIAL AREA, city names, etc.",
+            "Step 4: Extract and validate PAN, Invoice Number, and Dates.",
+            "Step 5: Use line items context (products, domains) to validate company extraction.",
+            "Step 6: Return clean, segregated JSON with company names separate from addresses.",
+        ],
+        "ocr_raw_text": ocr_text_sample[:2000],  # First 2000 chars of raw OCR
+        "currently_extracted": {
+            "header": header,
+            "bill_to": bill_to,
+        },
+        "line_items_sample": {
+            "count": len(line_items),
+            "sample_items": line_items_summary,
+            "has_pharmaceutical_context": any(
+                any(
+                    keyword in str(item.get("product_description", "")).lower()
+                    for keyword in ["tablet", "capsule", "syrup", "injection", "medicine", "pharma"]
+                )
+                for item in line_items[:5]
+            ),
+        },
+    }
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
+        ],
+        "temperature": 0,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        req = request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+
+        content = body["choices"][0]["message"]["content"].strip()
+        # Remove markdown code blocks if present
+        content = re.sub(r'^```json\s*|\s*```$', '', content, flags=re.IGNORECASE | re.MULTILINE).strip()
+        refined = json.loads(content)
+
+        if not isinstance(refined, dict) or "header" not in refined or "bill_to" not in refined:
+            print("  [LLM] Header refinement ignored: invalid JSON format")
+            return header, bill_to
+
+        # Validate and merge refined header data
+        refined_header = dict(header)
+        refined_bill_to = dict(bill_to)
+
+        # Process refined header
+        if isinstance(refined.get("header"), dict):
+            refined_header_data = refined["header"]
+
+            # Company name (string or list) - with validation to reject labels
+            if "company_name" in refined_header_data and refined_header_data["company_name"]:
+                company_name = refined_header_data["company_name"]
+                assigned = False
+
+                if isinstance(company_name, str):
+                    if _is_valid_company_name(company_name):
+                        refined_header["company_name"] = company_name.strip()
+                        assigned = True
+                    else:
+                        print(f"    [VALIDATION] Rejected invalid company_name: '{company_name}'")
+                elif isinstance(company_name, list):
+                    # If list, take first valid item
+                    for name in company_name:
+                        if isinstance(name, str) and _is_valid_company_name(name):
+                            refined_header["company_name"] = name.strip()
+                            assigned = True
+                            break
+                    if not assigned and company_name:
+                        print(f"    [VALIDATION] No valid company_name found in list: {company_name}")
+
+            # PAN
+            if "pan" in refined_header_data and refined_header_data["pan"]:
+                refined_header["pan"] = refined_header_data["pan"]
+
+            # Invoice number
+            if "invoice_no" in refined_header_data and refined_header_data["invoice_no"]:
+                refined_header["invoice_no"] = refined_header_data["invoice_no"]
+
+            # Invoice date
+            if "invoice_date" in refined_header_data and refined_header_data["invoice_date"]:
+                refined_header["invoice_date"] = refined_header_data["invoice_date"]
+
+            # Due date
+            if "due_date" in refined_header_data and refined_header_data["due_date"]:
+                refined_header["due_date"] = refined_header_data["due_date"]
+
+        # Process refined bill_to
+        if isinstance(refined.get("bill_to"), dict):
+            refined_bill_to_data = refined["bill_to"]
+
+            # Customer name (string preferred, but handle list) - with validation
+            if "name" in refined_bill_to_data:
+                name_val = refined_bill_to_data["name"]
+                assigned = False
+
+                if isinstance(name_val, str):
+                    if _is_valid_company_name(name_val):
+                        refined_bill_to["name"] = name_val.strip()
+                        assigned = True
+                    else:
+                        print(f"    [VALIDATION] Rejected invalid bill_to.name: '{name_val}'")
+                        refined_bill_to["name"] = None
+                elif isinstance(name_val, list) and name_val:
+                    # Handle list: take first valid item
+                    for name in name_val:
+                        if isinstance(name, str) and _is_valid_company_name(name):
+                            refined_bill_to["name"] = name.strip()
+                            assigned = True
+                            break
+                    if not assigned:
+                        refined_bill_to["name"] = None
+                elif not name_val:
+                    refined_bill_to["name"] = None
+
+            # Address
+            if "address" in refined_bill_to_data and refined_bill_to_data["address"]:
+                refined_bill_to["address"] = refined_bill_to_data["address"]
+
+            # Date
+            if "date" in refined_bill_to_data and refined_bill_to_data["date"]:
+                refined_bill_to["date"] = refined_bill_to_data["date"]
+
+        print("  [LLM] Header and Bill-To refinement applied successfully")
+        return refined_header, refined_bill_to
+
+    except (error.URLError, error.HTTPError, KeyError, IndexError, json.JSONDecodeError, TimeoutError) as exc:
+        print(f"  [LLM] Header refinement skipped: {exc}")
+        return header, bill_to
+    except json.JSONDecodeError as e:
+        print(f"  [LLM] Failed to parse JSON response: {e}")
+        return header, bill_to
+    except Exception as e:
+        print(f"  [LLM] Unexpected error during header refinement: {e}")
+        return header, bill_to
+
+
 def refine_line_items_with_openrouter(
     line_items: List[Dict[str, Any]],
     table_rows_text: List[str],
-    header: Dict[str, Any],
-    bill_to: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     """Optionally refine OCR-extracted line items using OpenRouter LLM.
 
@@ -897,57 +967,20 @@ def refine_line_items_with_openrouter(
     endpoint = "https://openrouter.ai/api/v1/chat/completions"
 
     system_prompt = (
-        "You are an expert pharmaceutical invoice line-item processor. Your task is to refine and correct "
-        "OCR-extracted invoice line items using the provided invoice header, bill-to details, and raw table text.\n\n"
-        "CRITICAL RULES:\n"
-        "1. Return ONLY a valid JSON array - no explanations, no markdown, no code fences.\n"
-        "2. Maintain exact same item count and row_index values - do not add/remove/reorder items.\n"
-        "3. NEVER hallucinate values - only correct if clearly inferable from provided data.\n"
-        "4. Use null for any unknown/unrecoverable fields.\n\n"
-        "FIELD GUIDELINES:\n"
-        "- row_index: Keep unchanged (sequential identifier)\n"
-        "- product_description: Medical/pharma product names (e.g., 'ASPIRIN 500MG', 'COUGH SYRUP')\n"
-        "- hsn_code: 8-digit numeric code for pharmaceutical items\n"
-        "- batch_no: Alphanumeric batch identifier (e.g., 'B2024001')\n"
-        "- expiry_date: Format MM/YYYY or DD/MM/YYYY\n"
-        "- qty: Integer quantity (e.g., 10, 100, 500)\n"
-        "- uom: Unit of Measure (BOX, STRIP, BLISTER, PCS, PIECE, CARTON, etc.)\n"
-        "- mrp: Maximum Retail Price (positive decimal, typically 10-10000)\n"
-        "- ptr: Price to Retailer (positive decimal, typically 20-90% of MRP)\n"
-        "- pts: Price to Stockist (positive decimal, typically 10-80% of MRP)\n"
-        "- discount: Discount percentage (0-100, typically 0-50%)\n"
-        "- cgst: Central GST percentage (0-28%, common: 5%, 12%, 18%)\n"
-        "- sgst: State GST percentage (0-28%, same as CGST in India)\n"
-        "- total_amount: Line total after discounts and taxes (positive decimal)\n"
-        "- accuracy_score: Keep as provided or set to 0.0 if corrected\n\n"
-        "VALIDATION RULES:\n"
-        "- Quantity must be positive integer\n"
-        "- Prices (mrp, ptr, pts) must be positive and mrp >= ptr >= pts (usually)\n"
-        "- GST percentages must be 0-28 and equal (CGST = SGST in India)\n"
-        "- Discount must be 0-100 percent\n"
-        "- total_amount = (mrp * qty) - (discount/100 * mrp * qty) + taxes\n"
-        "- Dates must be valid and past/present (not future)\n"
+        "You are an invoice line-item correction engine. "
+        "Return ONLY valid JSON array. "
+        "Keep same item count and row_index values. "
+        "Do not hallucinate values not inferable from provided rows. "
+        "Fields allowed: row_index, product_description, hsn_code, batch_no, expiry_date, qty, uom, "
+        "mrp, ptr, pts, discount, cgst, sgst, total_amount, accuracy_score."
     )
 
     user_prompt = {
-        "invoice_metadata": {
-            "company_name": header.get("company_name"),
-            "invoice_no": header.get("invoice_no"),
-            "invoice_date": header.get("invoice_date"),
-        },
-        "bill_to": {
-            "customer_name": bill_to.get("name"),
-            "customer_address": bill_to.get("address"),
-        },
         "instructions": [
-            "Step 1: Review the invoice metadata (company, invoice#, date) for context.",
-            "Step 2: Use bill_to customer details to validate product relevance.",
-            "Step 3: Analyze table_rows_text to identify column positions and patterns.",
-            "Step 4: For each current_item, correct fields only if clearly supported by table data.",
-            "Step 5: Validate that prices follow: MRP >= PTR >= PTS (pharmaceutical pricing hierarchy).",
-            "Step 6: Ensure GST values are valid Indian tax rates (typically 5%, 12%, 18%, 28%).",
-            "Step 7: Cross-check totals: total_amount should align with (qty * price) and tax calculations.",
-            "Step 8: Return corrected items maintaining original structure and count."
+            "Correct numeric column assignments (mrp/ptr/pts/discount/cgst/sgst/total_amount).",
+            "Preserve product_description and hsn_code when already plausible.",
+            "Use null for unknown fields.",
+            "Keep same list length and order."
         ],
         "table_rows_text": table_rows_text,
         "current_items": line_items,
@@ -995,7 +1028,7 @@ def refine_line_items_with_openrouter(
                 if key in item:
                     base[key] = item[key]
 
-            for key in ["mrp", "ptr", "pts", "tp_value", "scheme_value", "discount", "cgst", "sgst", "total_amount"]:
+            for key in ["mrp", "ptr", "pts", "discount", "cgst", "sgst", "total_amount"]:
                 if base.get(key) is not None:
                     try:
                         base[key] = _round2(float(base[key]))
@@ -1055,7 +1088,7 @@ def _normalize_line_item_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         else:
             normalized[tax_key] = _round2(tax_val_f)
 
-    for number_key in ["mrp", "ptr", "pts", "tp_value", "scheme_value", "discount", "total_amount"]:
+    for number_key in ["mrp", "ptr", "pts", "discount", "total_amount"]:
         val = normalized.get(number_key)
         if val is not None:
             try:
@@ -1100,76 +1133,52 @@ def normalize_line_items(line_items: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def _looks_like_company_name(text: str) -> bool:
-    """Check if text looks like a company name (not address, email, etc)."""
-    if not text or len(text.strip()) < 5:
+    candidate = re.sub(r'\s+', ' ', str(text or '').strip())
+    if len(candidate) < 4 or len(candidate) > 90:
         return False
 
-    candidate = re.sub(r'\s+', ' ', str(text).strip())
+    if not re.search(r'[A-Za-z]{3,}', candidate):
+        return False
 
-    exclude = re.compile(
-        r'(^EMAIL|^PHONE|^MOBILE|^FAX|^WEBSITE|^ADDRESS|^WAREHOUSE|'
-        r'FLOOR|BUILDING|PLOT|ROAD|STREET|CITY|STATE|PIN|VILLAGE|'
-        r'^INVOICE|^BILL|^SHIP|^CUSTOMER|ATTN|C/O|DIN|PAN|GSTIN|CIN NO|TAN|'
-        r'SUBJECT|REF|DATE|DOOR|HOUSE|APARTMENT|FLAT|SUITE)',
+    blocked = re.search(
+        r'INVOICE|BILL\s*TO|SHIP\s*TO|GSTIN|PAN|DATE|DUE|PO\s*REF|ORDER|HSN|QTY|AMOUNT|TOTAL|CGST|SGST|TERMS|'
+        r'CUSTOMER\s*DETAILS|IRN\s*NO|TYPE\s*OF\s*SALE|PLACE\s*OF\s*SALE|EWAY|TRANSPORT',
+        candidate,
         re.IGNORECASE,
     )
-    if exclude.search(candidate):
+    if blocked:
         return False
 
-    letters = re.sub(r'[^A-Za-z]', '', candidate)
-    if len(letters) < 4:
+    address_like = re.search(
+        r'\b(ROAD|RD|STREET|ST\.?|LANE|AREA|NAGAR|SECTOR|PHASE|BLOCK|FLOOR|BUILDING|BLDG|'
+        r'NEAR|OPP|DISTRICT|CITY|STATE|COUNTRY|PIN|PINCODE|POSTAL|INDUSTRIAL)\b',
+        candidate,
+        re.IGNORECASE,
+    )
+    if address_like:
         return False
 
-    # Avoid rows that are mostly IDs/vehicle/license style values.
-    if re.search(r'\b\d{2,}[A-Z]*\b', candidate) and len(letters) < 8:
+    if re.search(r'\b\d{6}\b', candidate):
         return False
 
-    if re.search(r'\bDL\s*NO\b|\bGSTIN\b|\bPAN\b|\bINVOICE\b|\bDATE\b|\bIRN\b|\bVEHICLE\b', candidate, re.IGNORECASE):
+    digits = len(re.findall(r'\d', candidate))
+    if digits > max(3, int(len(candidate) * 0.25)):
         return False
 
     return True
 
 
-def _extract_company_candidates(
-    rows: List[List[Dict]],
-    max_rows: int = 25,
-    require_legal_suffix: bool = True,
-) -> List[str]:
-    """Extract company-name candidates with strict or relaxed legal-suffix mode."""
+def _extract_company_candidates(rows: List[List[Dict]], max_rows: int = 25) -> List[str]:
     candidates: List[Tuple[float, str]] = []
     legal_suffix = re.compile(
-        r'\b(PVT\.?\s*LTD\.?|PRIVATE\s+LIMITED|LIMITED|LTD\.?|LLP|LLC|INC\.?|CORP\.?|CORPORATION|'
-        r'ENTERPRISES?|TRADERS?|DISTRIBUTORS?|HOLDING|MANUFACTURING|PHARMA|CHEMICALS?|'
-        r'COMPANY|CO\.?|ASSOCIATES?|GROUP|SERVICES?|SOLUTIONS?|SYSTEMS?)\b',
-        re.IGNORECASE,
-    )
-
-    exclude_patterns = re.compile(
-        r'(^CIN\s+NO|EMAIL|ADDRESS|PHONE|MOBILE|FAX|WEBSITE|WAREHOUSE|OFFICE|'
-        r'FLOOR|BUILDING|PLOT|ROAD|STREET|CITY|STATE|PIN|GSTIN|PAN|TAN|'
-        r'INVOICE|BILL|SHIP|CUSTOMER\s*DETAILS?|SUBJECT|REF\.|DATE|DOOR|HOUSE|'
-        r'APARTMENT|FLAT|SUITE|ATTN|C/O|DIN|@|INV NO|IRN|TRANSPORT|VEHICLE|DL\s*NO|FSSAI)',
+        r'\b(PVT\.?\s*LTD\.?|PRIVATE\s+LIMITED|LIMITED|LTD\.?|LLP|LLC|INC\.?|CORP\.?|CORPORATION|ENTERPRISES?|TRADERS?|DISTRIBUTORS?)\b',
         re.IGNORECASE,
     )
 
     for row_idx, row in enumerate(rows[:max_rows]):
         row_text = ' '.join(c.get('text', '') for c in row).strip()
         row_text = re.sub(r'\s+', ' ', row_text)
-        if not row_text or len(row_text) < 8:
-            continue
-
-        has_legal_suffix = bool(legal_suffix.search(row_text))
-        if require_legal_suffix and not has_legal_suffix:
-            continue
-
-        if exclude_patterns.search(row_text):
-            continue
-
         if not _looks_like_company_name(row_text):
-            continue
-
-        special_count = len(re.findall(r'[^\w\s\.\-\&\']', row_text))
-        if special_count > 3:
             continue
 
         letters = re.sub(r'[^A-Za-z]', '', row_text)
@@ -1177,27 +1186,15 @@ def _extract_company_candidates(
         upper_ratio = (len(upper_letters) / len(letters)) if letters else 0.0
 
         score = 0.0
-        score += max(0.0, 2.0 - (row_idx * 0.1))
-        if 10 <= len(row_text) <= 80:
-            score += 1.5
-        if 0.5 < upper_ratio < 0.95:
-            score += 1.0
-        elif upper_ratio >= 0.8:
-            score += 1.2
-
-        if has_legal_suffix:
-            score += 3.0
-        elif not require_legal_suffix:
+        score += max(0.0, 1.4 - (row_idx * 0.06))
+        if 8 <= len(row_text) <= 60:
             score += 0.8
-
-        numbers = len(re.findall(r'\d', row_text))
-        if numbers > 3:
-            score -= 0.5
+        if upper_ratio > 0.75:
+            score += 1.0
+        if legal_suffix.search(row_text):
+            score += 2.0
 
         candidates.append((score, row_text))
-
-    if not candidates:
-        return []
 
     candidates.sort(key=lambda item: item[0], reverse=True)
 
@@ -1210,130 +1207,44 @@ def _extract_company_candidates(
         seen_keys.add(key)
         deduped.append(text)
 
+    # Prefer legal-entity lines if present; avoids selecting address-like remnants.
+    legal_only = [t for t in deduped if legal_suffix.search(t)]
+    if legal_only:
+        return legal_only
+
     return deduped
 
 
-def _extract_bill_to_block_lines(page_rows: List[List[Dict]]) -> List[str]:
-    """Extract only customer-details block lines from the left section of page."""
-    in_block = False
-    lines: List[str] = []
-    left_block_limit: Optional[float] = None
-
-    for row in page_rows:
-        row_text = " ".join(c.get("text", "") for c in row).strip()
-        if not row_text:
-            continue
-
-        if re.search(r'BILL\s*TO|SHIP\s*TO|CUSTOMER\s*DETAILS?', row_text, re.IGNORECASE):
-            in_block = True
-
-            right_markers = [
-                c.get("x1")
-                for c in row
-                if re.search(r'IRN|TYPE\s*OF\s*SALE|PLACE\s*OF\s*SALE|CUST\.?\s*ORDER', c.get("text", ""), re.IGNORECASE)
-            ]
-            if right_markers:
-                left_block_limit = min(right_markers) - 20
-            continue
-
-        if not in_block:
-            continue
-
-        if re.search(r'PRODUCT\s*DESCRIPTION|HSN|BATCH|QTY|TAXABLE|CGST|SGST|IGST', row_text, re.IGNORECASE):
-            break
-
-        if re.search(r'TOTAL\s*AMOUNT|GRAND\s*TOTAL|TERMS\s*&?\s*CONDITION', row_text, re.IGNORECASE):
-            break
-
-        if left_block_limit is not None:
-            left_cells = [c for c in row if c.get("x1", 0) < left_block_limit]
-        else:
-            left_cells = [c for c in row if c.get("x1", 0) < 900]
-
-        if not left_cells:
-            continue
-
-        line = " ".join(c.get("text", "") for c in left_cells).strip()
-        line = re.sub(r'\s+', ' ', line)
-        if not line:
-            continue
-
-        # Ignore known labels while keeping actual values.
-        if re.fullmatch(r'CUSTOMER\s*DETAILS\s*:?', line, flags=re.IGNORECASE):
-            continue
-
-        lines.append(line)
-
-    return lines
-
-
 def _extract_company_names_from_header(page_rows: List[List[Dict]]) -> List[str]:
-    """Extract company names from header section (before bill-to section)."""
     header_rows: List[List[Dict]] = []
     for row in page_rows:
         row_text = " ".join(c.get("text", "") for c in row)
-        if re.search(r'BILL\s*TO|SHIP\s*TO|CUSTOMER.*ADDRESS|DELIVERY\s*ADDRESS', row_text, re.IGNORECASE):
+        if re.search(r'BILL\s*TO|SHIP\s*TO|CUSTOMER.*ADDRESS', row_text, re.IGNORECASE):
             break
         header_rows.append(row)
 
-    search_rows = header_rows if header_rows else page_rows
-
-    # Pass 1: strict legal-suffix extraction.
-    strict_candidates = _extract_company_candidates(
-        search_rows,
-        max_rows=25,
-        require_legal_suffix=True,
-    )
-    if strict_candidates:
-        return strict_candidates[:1]
-
-    # Pass 2: relaxed fallback (no mandatory suffix).
-    relaxed_candidates = _extract_company_candidates(
-        search_rows,
-        max_rows=25,
-        require_legal_suffix=False,
-    )
-    if relaxed_candidates:
-        print("  [INFO] Company name extracted via relaxed fallback (no legal suffix detected)")
-        return relaxed_candidates[:1]
-
-    print("  [WARN] Company name could not be extracted from header")
-    return []
+    return _extract_company_candidates(header_rows if header_rows else page_rows, max_rows=25)[:3]
 
 
 def _extract_company_names_from_bill_to(page_rows: List[List[Dict]]) -> List[str]:
-    block_lines = _extract_bill_to_block_lines(page_rows)
-    if not block_lines:
-        return []
+    in_bill_to = False
+    bill_rows: List[List[Dict]] = []
 
-    # Build pseudo-rows so we can reuse the existing scoring pipeline.
-    pseudo_rows: List[List[Dict]] = []
-    for line in block_lines:
-        pseudo_rows.append([
-            {
-                "text": line,
-                "x1": 0,
-                "x2": 1,
-                "xc": 0,
-                "y1": 0,
-                "y2": 1,
-                "yc": 0,
-                "conf": 1.0,
-            }
-        ])
-
-    names = _extract_company_candidates(pseudo_rows, max_rows=12, require_legal_suffix=False)[:3]
-    if names:
-        return names
-
-    # Fallback: first meaningful line with letters and no strong label pattern.
-    for line in block_lines:
-        if re.search(r'STATE\s*:?|GSTIN\s*:?|PAN\s*:?|DL\s*NO\s*:?|FSSAI\s*:?', line, re.IGNORECASE):
+    for row in page_rows:
+        row_text = " ".join(c.get("text", "") for c in row)
+        if re.search(r'BILL\s*TO|SHIP\s*TO|CUSTOMER.*ADDRESS', row_text, re.IGNORECASE):
+            in_bill_to = True
             continue
-        if re.search(r'[A-Za-z]{4,}', line) and not re.search(r'\d{6,}', line):
-            return [line]
 
-    return []
+        if not in_bill_to:
+            continue
+
+        if re.search(r'PRODUCT|HSN|BATCH|QTY|TOTAL|AMOUNT|INVOICE|DUE', row_text, re.IGNORECASE):
+            break
+
+        bill_rows.append(row)
+
+    return _extract_company_candidates(bill_rows, max_rows=15)[:3]
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -1348,12 +1259,11 @@ def extract_invoice_header(page_rows: List[List[Dict]]) -> Tuple[Dict, float]:
     
     # Initialize with all fields as None
     header = {field: None for field in HEADER_FIELDS}
-    header["company_name"] = None
+    header["company_name"] = []
     
     # ─── Company Name ──────────────────────────────────────────────────────
     company_names = _extract_company_names_from_header(page_rows)
-    if company_names:
-        header["company_name"] = cleaner.clean_string(company_names[0])
+    header["company_name"] = [n for n in (cleaner.clean_string(x) for x in company_names) if n]
     
     # ─── PAN (Supplier) ────────────────────────────────────────────────────
     pan_text, _ = _extract_labeled_value(
@@ -1414,23 +1324,37 @@ def extract_bill_to(page_rows: List[List[Dict]]) -> Tuple[Dict, float]:
     bill_to = {field: None for field in BILL_TO_FIELDS}
     bill_to["name"] = []
     
-    # ─── Extract Bill-To block lines ────────────────────────────────────
-    block_lines = _extract_bill_to_block_lines(page_rows)
+    # ─── Extract Bill-To Address Lines ──────────────────────────────────
+    addr_lines = []
+    in_bill_to = False
+    LEFT_MARGIN = 800  # Approximate left boundary
+    
+    for row in page_rows:
+        row_text = " ".join(c["text"] for c in row)
+        
+        if re.search(r'BILL\s*TO|SHIP\s*TO|CUSTOMER.*ADDRESS', row_text, re.IGNORECASE):
+            in_bill_to = True
+            continue
+        
+        if in_bill_to:
+            # Stop at table headers or summary sections
+            if re.search(r'PRODUCT|HSN|BATCH|QTY|TOTAL|AMOUNT|INVOICE|DUE', 
+                        row_text, re.IGNORECASE):
+                break
+            
+            # Collect address text from left side of page
+            left_cells = [c for c in row if c["x1"] < LEFT_MARGIN]
+            if left_cells:
+                line = " ".join(c["text"] for c in left_cells).strip()
+                if line and len(line) > 3:
+                    addr_lines.append(line)
     
     bill_names = _extract_company_names_from_bill_to(page_rows)
     bill_to["name"] = [n for n in (cleaner.clean_string(x) for x in bill_names) if n]
 
-    if block_lines:
-        filtered_lines = []
-        for line in block_lines:
-            if any(re.search(rf'^{re.escape(name)}$', line, re.IGNORECASE) for name in bill_to["name"]):
-                continue
-            if re.search(r'^(STATE|STATE\s*CODE|GSTIN\s*NO|PAN\s*NO|DL\s*NO|FSSAI\s*NO)\b', line, re.IGNORECASE):
-                continue
-            filtered_lines.append(line)
-
-        if filtered_lines:
-            bill_to["address"] = " ".join(filtered_lines)
+    if addr_lines:
+        if len(addr_lines) > 1:
+            bill_to["address"] = " ".join(addr_lines[1:])
     
     # ─── Bill Date (PO/Order date if available) ─────────────────────────
     bill_date, _ = _extract_labeled_value(
@@ -1455,7 +1379,6 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
     """
     Extract line items with guaranteed field structure.
     Every item returned has all LINE_ITEM_FIELDS (null if not found).
-    Uses batch number for duplicate detection.
     Returns: (items_list, accuracy_scores_list)
     """
     scorer = AccuracyScorer()
@@ -1471,8 +1394,6 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
     item_index = 0
     in_table = False
     table_ended = False
-    seen_batches = set()  # Track (product_name, batch_number) tuples to avoid duplicates
-
 
     for page_rows in all_page_rows:
         for row in page_rows:
@@ -1499,7 +1420,9 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                         row_text, re.IGNORECASE):
                 if current_item:
                     items.append(current_item)
-                    item_accuracies.append(scorer.score_item(current_item))
+                    item_accuracies.append(
+                        scorer.score_item(current_item)
+                    )
                     current_item = None
                 table_ended = True
                 break
@@ -1512,66 +1435,11 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
             # ─── Map current row values to detected columns ─────────────
             row_values = _assign_row_to_columns(row, col_positions)
 
-            # ─── Detect new item: HSN code or strong product pattern ──────
+            # ─── Detect new item: prefer HSN column, fallback regex ──────
             hsn_candidate = row_values.get("hsn_code")
             hsn_match = re.search(r'\b(\d{8})\b', hsn_candidate or row_text)
 
-            # More flexible item detection - not just HSN
-            is_new_item = False
-            detected_hsn = None
-
-            if hsn_match and _is_valid_hsn_context(row_text, hsn_match.group(1)):
-                is_new_item = True
-                detected_hsn = hsn_match.group(1)
-
-            # Alternative detection: Strong product pattern even without HSN
-            elif (not current_item and
-                  re.search(r'\b[A-Z]{3,}\b.*\b(TAB|CAP|INJ|SYR|TABLET|CAPSULE)\b', row_text, re.IGNORECASE) and
-                  re.search(r'\d+', row_text)):  # Has some numbers
-                is_new_item = True
-
-            if is_new_item:
-                # Extract product description and batch early to check for duplicates
-                product_text = row_values.get("product_description")
-                if product_text:
-                    product_text = re.sub(r'^\s*\d+\s*', '', product_text)
-                    product_text = re.sub(r'\s+', ' ', product_text).strip(' :-|')
-                    # If it looks like a short code, try to get better description
-                    if len(product_text) <= 10 and re.match(r'^[A-Z0-9]+$', product_text):
-                        for cell in row:
-                            cell_text = cell.get("text", "").strip()
-                            if (len(cell_text) > 10 and
-                                not re.match(r'^\d+$', cell_text) and
-                                not re.match(r'^[A-Z0-9]{3,10}$', cell_text) and
-                                re.search(r'[A-Za-z]{3,}', cell_text) and
-                                not re.search(r'\d{8}', cell_text)):
-                                product_text = cell_text
-                                break
-
-                if not product_text and detected_hsn:
-                    left_text = row_text.split(detected_hsn, 1)[0]
-                    product_text = re.sub(r'^\s*\d+\s*', '', left_text)
-                    product_text = re.sub(r'\s+', ' ', product_text).strip(' :-|')
-
-                # Check for batch-based duplicates before creating new item
-                potential_batch = None
-
-                # Try to extract batch number from this row
-                if row_values.get("batch_no"):
-                    batch_text = row_values.get("batch_no")
-                    batch_match = re.search(r'[A-Z0-9\']{4,12}', str(batch_text).upper())
-                    if batch_match:
-                        potential_batch = batch_match.group(0)
-                else:
-                    # Fallback batch extraction from row text
-                    potential_batch = _extract_batch_from_text(row_text, detected_hsn)
-
-                # Skip only if we've seen this exact product+batch combination (true duplicate)
-                # Don't skip just because batch exists - allow same product with different batches
-                product_batch_key = (product_text, potential_batch) if product_text else (None, potential_batch)
-                if product_batch_key in seen_batches:
-                    continue
-
+            if hsn_match:
                 # Save previous item
                 if current_item:
                     items.append(current_item)
@@ -1582,17 +1450,18 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                 current_item["row_index"] = item_index
                 item_index += 1
 
-                # Set HSN if detected
-                if detected_hsn:
-                    current_item["hsn_code"] = detected_hsn
+                # Set HSN immediately
+                current_item["hsn_code"] = hsn_match.group(1)
 
-                # Record product+batch combination to prevent duplicates
-                if product_batch_key not in seen_batches:
-                    seen_batches.add(product_batch_key)
-                    if potential_batch:
-                        current_item["batch_no"] = potential_batch
-
-                # Set product description
+                # Prefer product column; fallback to text before HSN
+                product_text = row_values.get("product_description")
+                if product_text:
+                    product_text = re.sub(r'^\s*\d+\s*', '', product_text)
+                    product_text = re.sub(r'\s+', ' ', product_text).strip(' :-|')
+                if not product_text:
+                    left_text = row_text.split(hsn_match.group(1), 1)[0]
+                    product_text = re.sub(r'^\s*\d+\s*', '', left_text)
+                    product_text = re.sub(r'\s+', ' ', product_text).strip(' :-|')
                 if product_text and re.search(r'[A-Za-z]{2,}', product_text):
                     current_item["product_description"] = cleaner.clean_string(product_text)
 
@@ -1605,32 +1474,14 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                 if product_text and not re.search(r'PRODUCT|DESCRIPTION', product_text, re.IGNORECASE):
                     product_text = re.sub(r'^\s*\d+\s*', '', product_text)
                     product_text = re.sub(r'\s+', ' ', product_text).strip(' :-|')
-
-                    # Check if this looks like a proper description vs a code
-                    if len(product_text) > 6 and not re.match(r'^[A-Z0-9]{3,10}$', product_text):
-                        if re.search(r'[A-Za-z]{3,}', product_text):
-                            current_item["product_description"] = cleaner.clean_string(product_text)
-                    elif len(product_text) <= 10:
-                        # Short text - might be code, look for better description in row
-                        for cell in row:
-                            cell_text = cell.get("text", "").strip()
-                            if (len(cell_text) > 10 and
-                                cell_text != product_text and
-                                not re.match(r'^\d+$', cell_text) and
-                                not re.match(r'^[A-Z0-9]{3,10}$', cell_text) and
-                                re.search(r'[A-Za-z]{3,}', cell_text) and
-                                not re.search(r'\d{8}', cell_text)):
-                                current_item["product_description"] = cleaner.clean_string(cell_text)
-                                break
+                    if re.search(r'[A-Za-z]{2,}', product_text):
+                        current_item["product_description"] = cleaner.clean_string(product_text)
 
             if not current_item["batch_no"] and row_values.get("batch_no"):
                 batch_text = row_values.get("batch_no")
                 batch_match = re.search(r'[A-Z0-9\']{4,12}', str(batch_text).upper())
                 if batch_match:
-                    batch_candidate = batch_match.group(0)
-                    if batch_candidate not in seen_batches:
-                        current_item["batch_no"] = batch_candidate
-                        seen_batches.add(batch_candidate)
+                    current_item["batch_no"] = batch_match.group(0)
 
             if not current_item["expiry_date"] and row_values.get("expiry_date"):
                 exp_text = row_values.get("expiry_date")
@@ -1651,8 +1502,6 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                 "mrp": "mrp",
                 "ptr": "ptr",
                 "pts": "pts",
-                "tp_value": "tp_value",
-                "scheme_value": "scheme_value",
                 "discount": "discount",
                 "cgst": "cgst",
                 "sgst": "sgst",
@@ -1666,64 +1515,6 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
                     if parsed is not None:
                         current_item[item_key] = _round2(parsed)
 
-            # ──── IMPROVED TOTAL AMOUNT EXTRACTION ────────────────────────
-            if current_item["total_amount"] is None:
-                # Priority 1: Transaction Value from improved column detection
-                if "total_amount" in detected_cols and row_values.get("total_amount"):
-                    raw_value = row_values.get("total_amount")
-                    # Handle comma-separated values properly
-                    if re.match(r'^\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?$', raw_value):
-                        parsed = float(raw_value.replace(",", ""))
-                        if parsed > 10:  # Must be reasonable transaction value
-                            current_item["total_amount"] = _round2(parsed)
-                    else:
-                        # Try to extract number if not perfectly formatted
-                        parsed = cleaner.extract_number(raw_value)
-                        if parsed is not None and parsed > 10:
-                            current_item["total_amount"] = _round2(parsed)
-
-                # Priority 2: Enhanced pattern matching on row text
-                if current_item["total_amount"] is None:
-                    total_fallback = _extract_total_amount_from_row_text(row_text)
-                    if total_fallback is not None:
-                        current_item["total_amount"] = total_fallback
-
-                # Priority 3: Look for rightmost large numeric value in row
-                if current_item["total_amount"] is None:
-                    # Find all substantial numeric values in the row
-                    all_numbers = []
-                    for cell in row:
-                        cell_text = cell.get("text", "").strip()
-                        # Match patterns like "1,598.40", "13,558.90", etc.
-                        number_match = re.search(r'(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)', cell_text)
-                        if number_match:
-                            try:
-                                value = float(number_match.group(1).replace(",", ""))
-                                if value > 50:  # Must be substantial for transaction value
-                                    all_numbers.append((cell.get("xc", 0), value))
-                            except ValueError:
-                                continue
-
-                    # Pick the rightmost substantial value
-                    if all_numbers:
-                        all_numbers.sort(key=lambda x: x[0])  # Sort by x position
-                        rightmost_value = all_numbers[-1][1]
-                        current_item["total_amount"] = _round2(rightmost_value)
-
-                # Priority 4: Calculate from available data if still missing
-                if (current_item["total_amount"] is None and
-                    current_item.get("qty") and current_item.get("pts")):
-                    calculated_base = current_item["qty"] * current_item["pts"]
-                    # Apply discount if available
-                    if current_item.get("discount"):
-                        calculated_base *= (1 - current_item["discount"] / 100)
-                    # Add taxes if available
-                    if current_item.get("sgst"):
-                        calculated_base *= (1 + current_item["sgst"] / 100)
-                    if current_item.get("cgst"):
-                        calculated_base *= (1 + current_item["cgst"] / 100)
-                    current_item["total_amount"] = _round2(calculated_base)
-
             # Fallbacks from raw row text for key fields when column mapping misses.
             if current_item["expiry_date"] is None:
                 exp_fallback = _extract_expiry_from_text(row_text)
@@ -1733,16 +1524,17 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
             if current_item["batch_no"] is None:
                 batch_fallback = _extract_batch_from_text(row_text, current_item.get("hsn_code"))
                 if batch_fallback:
-                    # Check if this product+batch combination already exists
-                    product_batch_key = (current_item.get("product_description"), batch_fallback)
-                    if product_batch_key not in seen_batches:
-                        current_item["batch_no"] = batch_fallback
-                        seen_batches.add(product_batch_key)
+                    current_item["batch_no"] = batch_fallback
 
             if current_item["pts"] is None and "pts" in detected_cols:
                 pts_fallback = _extract_pts_from_row_text(row_text)
                 if pts_fallback is not None:
                     current_item["pts"] = pts_fallback
+
+            if current_item["total_amount"] is None:
+                total_fallback = _extract_total_amount_from_row_text(row_text)
+                if total_fallback is not None:
+                    current_item["total_amount"] = total_fallback
 
             # Fallback for product name from continuation row text
             if not current_item["product_description"]:
@@ -1757,22 +1549,19 @@ def extract_line_items(all_page_rows: List[List[List[Dict]]]) -> Tuple[List[Dict
 
         if table_ended:
             break
-
+    
     # Don't forget last item
     if current_item:
         items.append(current_item)
         item_accuracies.append(scorer.score_item(current_item))
-
+    
     # Add accuracy scores to items
     for i, item in enumerate(items):
         if i < len(item_accuracies):
             item["accuracy_score"] = item_accuracies[i]
         else:
             item["accuracy_score"] = 0.0
-
-    print(f"  ✓ Extracted {len(items)} unique items (batch-based deduplication)")
-    print(f"  ✓ Detected batches: {len(seen_batches)}")
-
+    
     return items, item_accuracies
 
 
@@ -1807,13 +1596,28 @@ def process_pdf(pdf_path: str) -> Dict[str, Any]:
     # Step 3: Extraction
     print("\n[3/4] Extracting invoice data...")
     page_rows = [group_rows(p) for p in all_ocr]
-    
+
+    # Extract basic header, bill_to, and line items first
     header, header_acc = extract_invoice_header(page_rows[0])
     bill_to, bill_to_acc = extract_bill_to(page_rows[0])
     line_items, item_accs = extract_line_items(page_rows)
 
+    # Prepare OCR text sample (first page, first 3000 chars)
+    ocr_text_sample = ""
+    if page_rows:
+        for row in page_rows[0][:50]:  # First 50 rows
+            row_text = " ".join(c.get("text", "") for c in row if c.get("text"))
+            if row_text.strip():
+                ocr_text_sample += row_text + "\n"
+
+    # **CRITICAL: Refine header and bill_to using LLM with full context**
+    # This uses line items and OCR text to intelligently segregate metadata
+    print("  [LLM] Refining header and bill-to with line items context...")
+    header, bill_to = refine_header_with_openrouter(header, bill_to, line_items, ocr_text_sample)
+
+    # Refine line items
     table_rows_text = _collect_table_rows_text(page_rows)
-    line_items = refine_line_items_with_openrouter(line_items, table_rows_text, header, bill_to)
+    line_items = refine_line_items_with_openrouter(line_items, table_rows_text)
     line_items = normalize_line_items(line_items)
     
     print(f"  ✓ Header extracted (accuracy: {header_acc}%)")
@@ -1822,7 +1626,20 @@ def process_pdf(pdf_path: str) -> Dict[str, Any]:
     
     # Step 4: Compile output
     print("\n[4/4] Compiling output...")
-    
+
+    # Ensure company_name is properly formatted
+    if isinstance(header.get("company_name"), list):
+        header["company_name"] = header["company_name"][0] if header["company_name"] else None
+
+    # Ensure bill_to.name is properly formatted
+    if isinstance(bill_to.get("name"), list):
+        bill_to["name"] = bill_to["name"][0] if bill_to["name"] else None
+
+    # Remove internal fields from final output
+    for item in line_items:
+        item.pop("tp_value", None)
+        item.pop("scheme_value", None)
+
     output_data = {
         "source_file": pdf_path.name,
         "processed_at": datetime.now().isoformat(timespec="seconds"),
